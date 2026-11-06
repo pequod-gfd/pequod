@@ -1,0 +1,22 @@
+FC = ftn
+
+INCLUDES = #-I$(PETSC_DIR)/$(PETSC_ARCH)/include -I$(PETSC_DIR)/include
+LIBS = -llapack #-L$(PETSC_DIR)/$(PETSC_ARCH)/lib -lcraypetsc
+
+DEBUG = -O0 -g -Mbounds
+FLAGS = -r8 -Minform=inform -Mextend
+# Optimisations as suggested in the HECToR user guide at:
+#   http://www.hector.ac.uk/cse/documentation/SerialOpt/
+OPTIMISATION = -fast Mipa=fast -O3 -Minline -Munroll -Mvect
+# The following flag generated profile feedback optimisations to improve
+# later compilation
+#-Mpfi
+# The following flag reads profile feedback optimisations
+#-Mpfo
+LDOPTIMISATION = $(OPTIMISATION)
+
+FCFLAGS = $(OPTIMISATION) $(FLAGS) -DNDEBUG $(DEFINES) $(INCLUDES)
+#FCFLAGS = $(DEBUG) $(FLAGS) -DDDEBUG $(DEFINES) $(INCLUDES)
+
+LD = $(FC)
+LDFLAGS = $(LDOPTIMISATION)

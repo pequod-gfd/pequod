@@ -1,0 +1,236 @@
+#!/usr/bin/env python
+#
+# James Maddison
+
+import array
+import optparse
+import sys
+
+def Error(msg):
+  """
+  Print an error message and exit with a non-zero return code.
+  """
+
+  sys.stderr.write("%s\n" % msg)
+  sys.exit(1)
+
+try:
+  import numpy
+except ImportError:
+  Error("Failed to import numpy module")
+
+def IntArray(data = None, bytes = 4):
+  """
+  Return an integer array with the specified integer byte size.
+  """
+
+  if data is None:
+    arr = array.array("I")
+  else:
+    arr = array.array("I", data)
+  assert(arr.itemsize == bytes)
+
+  return arr
+
+def FloatArray(data = None, bytes = 8):
+  """
+  Return a float array with the specified integer byte size.
+  """
+
+  if data is None:
+    arr = array.array("d")
+  else:
+    arr = array.array("d", data)
+  assert(arr.itemsize == bytes)
+
+  return arr
+
+def ReadFloat(handle, iBytes = 4, rBytes = 8):
+  """
+  Read a floating point record.
+  """
+
+  arr = IntArray(bytes = iBytes)
+  arr.fromfile(handle, 1)
+  nFloats = arr[0] / rBytes
+
+  arr = FloatArray(bytes = rBytes)
+  arr.fromfile(handle, nFloats)
+  handle.seek(iBytes, 1)
+
+  return numpy.array(arr)
+
+def WriteFloat(handle, data, iBytes = 4, rBytes = 8):
+  """
+  Write a floating point record.
+  """
+
+  iArr = IntArray(data = [len(data) * rBytes], bytes = iBytes)
+  iArr.tofile(handle)
+
+  fArr = FloatArray(data = data, bytes = rBytes)
+  fArr.tofile(handle)
+
+  iArr.tofile(handle)
+
+  return
+
+optionParser = optparse.OptionParser( \
+  usage = "%prog [OPTIONS] BASENAME", \
+  add_help_option = True, \
+  description = "Merge parallel data files to form a serial data file")
+
+opts, args = optionParser.parse_args()
+
+if len(args) < 1:
+  Error("Input base name required")
+elif len(args) > 1:
+  Error("Unexpected trailing argument")
+
+basename = args[0]
+
+# Open the zero process meta-data file
+filename = "%s.0" % basename
+try:
+  handle = open(filename, "r")
+except IOError:
+  Error("File not found: %s" % filename)
+
+# Parse the zero process parallel meta-data
+line = handle.readline().split()
+assert(len(line) == 6)
+# Note: p_i / p_ii and p_j / p_jj have a different definition in the QG model
+n, p_ii, p_jj, p, p_i, p_j = map(int, line)
+assert(n > 0)
+assert(p_ii > 0)
+assert(p_jj > 0)
+assert(p >= 0 and p < n)
+assert(p_i > 0 and p_i <= p_ii)
+assert(p_j > 0 and p_j <= p_jj)
+line = handle.readline().split()
+assert(len(line) == 3)
+g_ii, g_jj, layers = map(int, line)
+assert(g_ii > 0)
+assert(g_jj > 0)
+assert(layers > 0)
+line = handle.readline().split()
+assert(len(line) == 4)
+ii_0, jj_0, ii, jj = map(int, line)
+assert(ii_0 >= 0 and ii_0 < g_ii)
+assert(jj_0 >= 0 and jj_0 < g_jj)
+assert(ii > 0 and ii <= g_ii)
+assert(jj > 0 and jj <= g_jj)
+line = handle.readline().split()
+assert(len(line) == 2)
+l_scale, t_scale = map(float, line)
+
+# Read the fields
+names = []
+dimNames = []
+data = []
+dims = {"ii":g_ii, "jj":g_jj, "layer":layers, "interface":layers - 1}
+line = handle.readline()
+while len(line) > 0:
+  line = line.split()
+  name = line[0]
+  assert(not name in names)
+  if len(line) == 1:
+    names.append(name)
+    dimNames.append([])
+    data.append(numpy.empty((1,)))
+  else:
+    names.append(name)
+    assert(len(line) >= 3 and line[1] == "ii" and line[2] == "jj")
+    dimNames.append(line[1:])
+    data.append(numpy.empty(tuple([dims[dimName] for dimName in line[1:]])))
+  line = handle.readline()
+handle.close()
+
+# Read the data
+for p in range(n):
+  if p > 0:
+    # Open the process p meta-data file
+    filename = "%s.%i" % (basename, p)
+    try:
+      handle = open(filename, "r")
+    except IOError:
+      Error("File not found: %s" % filename)
+
+    # Parse the process p parallel meta-data
+    line = handle.readline().split()
+    assert(len(line) == 6)
+    # Note: p_i / p_ii and p_j / p_jj have a different definition in the QG model
+    ln, lp_ii, lp_jj, p, p_i, p_j = map(int, line)
+    assert(ln == n)
+    assert(lp_ii == p_ii)
+    assert(lp_jj == p_jj)
+    assert(p >= 0 and p < n)
+    assert(p_i > 0 and p_i <= p_ii)
+    assert(p_j > 0 and p_j <= p_jj)
+    line = handle.readline().split()
+    assert(len(line) == 3)
+    lg_ii, lg_jj, llayers = map(int, line)
+    assert(llayers == layers)
+    assert(lg_ii == g_ii)
+    assert(lg_jj == g_jj)
+    line = handle.readline().split()
+    assert(len(line) == 4)
+    ii_0, jj_0, ii, jj = map(int, line)
+    assert(ii_0 >= 0 and ii_0 < g_ii)
+    assert(jj_0 >= 0 and jj_0 < g_jj)
+    assert(ii > 0 and ii <= g_ii)
+    assert(jj > 0 and jj <= g_jj)
+
+    handle.close()
+
+  # Open the process p data file
+  filename = "%s.d.%i" % (basename, p)
+  try:
+    handle = open(filename, "rb")
+  except IOError:
+    Error("File not found: %s" % filename)
+
+  # Read the process p data
+  for i, name in enumerate(names):
+    pData = ReadFloat(handle)
+    if len(data[i].shape) == 1:
+      if p == 0:
+        data[i][:] = pData[0]
+    else:
+      shape = [ii, jj] + list(data[i].shape[2:])
+      # Transpose from Fortran to C ordering
+      shape.reverse()
+      pData.shape = tuple(shape)
+      pData = pData.transpose([len(pData.shape) - 1 - j for j in range(len(pData.shape))])
+      if len(data[i].shape) == 2:
+        data[i][ii_0:ii_0 + ii, jj_0:jj_0 + jj] = pData
+      else:
+        data[i][ii_0:ii_0 + ii, jj_0:jj_0 + jj, :] = pData
+  handle.close()
+
+# Transpose from C to Fortran ordering
+for i in range(len(data)):
+  data[i] = data[i].transpose([len(data[i].shape) - 1 - j for j in range(len(data[i].shape))])
+
+# Write the output meta-data file
+filename = basename
+handle = open(basename, "w")
+handle.write("%i %i %i %i %i %i\n" % (1, 1, 1, 0, 1, 1))
+handle.write("%i %i %i\n" % (g_ii, g_jj, layers))
+handle.write("%i %i %i %i\n" % (0, 0, g_ii, g_jj))
+handle.write("%.17e %.17e\n" % (l_scale, t_scale))
+for i, name in enumerate(names):
+  handle.write("%s" % name)
+  for dimName in dimNames[i]:
+    handle.write(" %s" % dimName)
+  handle.write("\n")
+handle.flush()
+handle.close()
+
+# Write the output data
+filename = "%s.d" % basename
+handle = open(filename, "wb")
+for i, name in enumerate(names):
+  WriteFloat(handle, data[i].flatten())
+handle.flush()
+handle.close()

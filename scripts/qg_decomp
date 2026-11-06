@@ -1,0 +1,62 @@
+#!/usr/bin/env python
+#
+# James Maddison
+
+import optparse
+import sys
+
+optionParser = optparse.OptionParser( \
+  usage = "%prog [OPTIONS] g_ii g_jj p_ii p_jj", \
+  add_help_option = True, \
+  description = "Return a QG decomposition")
+
+opts, args = optionParser.parse_args()
+  
+if len(args) < 4:
+  sys.stderr.write("Decomposition required\n")
+  sys.exit(1)
+if len(args) > 4:
+  sys.stderr.write("Unexpected trailing argument\n")
+  sys.exit(1)
+
+g_ii, g_jj, p_ii, p_jj = map(int, args)
+if g_ii <= 0 or g_jj <= 0 or p_ii <= 0 or p_jj <= 0:
+  sys.stderr.write("Zero or negative sized input decomposition\n")
+  sys.exit(1)
+
+iis = [g_ii / p_ii for i in range(p_ii)]
+for i in range(1, g_ii - iis[0] * p_ii + 1):
+  iis[-i] += 1
+assert(sum(iis) == g_ii)
+
+jjs = [g_jj / p_jj for i in range(p_jj)]
+for i in range(1, g_jj - jjs[0] * p_jj + 1):
+  jjs[-i] += 1
+assert(sum(jjs) == g_jj)
+
+if min(iis) == 0 or min(jjs) == 0:
+  sys.stderr.write("Zero sized output decomposition\n")
+  sys.exit(1)
+
+s = "  integer, parameter, dimension(" + str(len(iis)) + ") :: iis = (/"
+for i in iis[:-1]:
+  if len(s + str(i) + ", ") > 77:
+    s += "&"
+    print s
+    s = "    & "
+  s += str(i) + ", "
+s += str(iis[-1]) + "/)"
+print s
+
+s = "  integer, parameter, dimension(" + str(len(jjs)) + ") :: jjs = (/"
+for i in jjs[:-1]:
+  if len(s + str(i) + ", ") > 77:
+    s += "&"
+    print s
+    s = "    & "
+  s += str(i) + ", "
+s += str(jjs[-1]) + "/)"
+print s
+
+print "  ! The maximum grid size over all processes"
+print "  integer, parameter :: ii_m = " + str(max(iis)) + ", jj_m = " + str(max(jjs))

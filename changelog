@@ -1,0 +1,73 @@
+0.9.5
+
+07/11/2012  Add some PV thickness quadratic diagnostics
+06/11/2012  Collocate zeta and psi eddy diagnostics in time when using the
+            CABARET scheme
+
+0.9.4
+
+25/09/2012  Add set_start_time / start_time_override options
+            Manual, getting started, and ground-up build instructions updates
+            Disable test_helmholtz_petsc and test_helmholtz_petsc_2 when
+            compiling without PETSc
+24/09/2012  Manual updates
+            Add qg_merge_parallel script
+17/09/2012  Tighten PETSc solver absolute tolerance
+            Remove HYPRE option
+            Use SAME_PRECONDITIONER in KSPSetOperators
+            Convert test_helmholtz_petsc and test_helmholtz_petsc_2 to
+            convergence tests
+03/09/2012  Add -lblas to makefile.gfortran
+15/08/2012  Tidy up BACKGROUND_HSHEAR code, apply dissipation terms to
+            perturbation only, output data and diagnostics for perturbation only
+11/08/2012  Optimisation of dissipation in cabaret_forcing
+            Rename: BACKGROUND_FLOW -> BACKGROUND_HSHEAR
+            Rename: BACKGROUND_SHEAR -> BACKGROUND_VSHEAR
+09/08/2012  Add background zonal flow profile support in barotropic mode
+08/08/2012  Manual updates
+03/07/2012  Print out layers to / from modes projection matrices
+22/06/2012  Update tested dependency versions in manual
+21/06/2012  Update PETSc interfaces for version 3.3
+14/06/2012  Ground-up build instructions update
+09/06/2012  Ground-up build instructions update
+07/06/2012  Add a ground-up build document
+05/06/2012  Fix to unittest/run_tests for absence of . in PATH
+29/05/2012  New documentation makefile
+            Add a getting started document
+            Remove dependency of qg_decomp on NumPy
+28/05/2012  Macports makefile update
+
+0.9.3
+
+28/05/2012  Manual updates
+02/04/2012  Manual updates
+27/03/2012  Add non-zero exit code to stop
+19/03/2012  First complete manual draft
+14/03/2012  Update PETSc interfaces for version 3.2
+            Rename rand interface to init_rand to avoid conflict with GCC
+            intrinsic
+            Add -std=f2003 flag in makefile.gfortran and makefile.macports
+03/03/2012  Increase robustness of CABARET communication by updating level one
+            halos
+28/02/2012  Add extra checking to qg_pickup script
+            Add qg_cleanup script
+
+0.9.2
+
+25/02/2012  Enforce compliance with gfortran 4.6.1 -std=f2003 flag
+23/02/2012  Convert qg3.F to free form Fortran
+22/02/2012  Dynamically allocate requests
+21/02/2012  Remove boundary flux diagnostics
+18/02/2012  Perform sanity check on number of layers
+            Convert unformatted binary output to the more portable stream
+            binary output
+17/02/2012  Add single layer support to CABARET scheme
+            Add single layer support to centred scheme
+
+0.9.1
+
+13/02/2012  Remove 2DECOMP&FFT code
+            Add buffering to the parallel tri-diagonal solver
+06/02/2012  Print version number to model logs
+05/02/2012  Always write output (snapshot, average, and eddy data) at
+            simulation end

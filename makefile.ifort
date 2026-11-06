@@ -1,0 +1,14 @@
+FC = $(MPI_DIR)/bin/mpif90
+
+INCLUDES = #-I$(PETSC_DIR)/$(PETSC_ARCH)/include
+LIBS = -llapack #-L$(PETSC_DIR)/$(PETSC_ARCH)/lib -lpetsc -lX11
+
+FLAGS = -real-size 64 -warn general -extend-source 132
+OPTIMISATION = -O3 -fast -parallel -ip -ipo -march=pentium4 -ftz -vec-report
+LDOPTIMISATION = -O3 -parallel -ip -ipo -march=pentium4 -ftz -vec-report
+# Removed -fast from LDOPTIMISATION due to linker errors on newton
+
+FCFLAGS = $(OPTIMISATION) $(FLAGS) -DNDEBUG $(DEFINES) $(INCLUDES)
+
+LD = $(FC)
+LDFLAGS = $(LDOPTIMISATION)

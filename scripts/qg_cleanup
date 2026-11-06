@@ -1,0 +1,142 @@
+#!/usr/bin/env python
+#
+# James Maddison
+
+"""
+Delete output data, except for the final valid model checkpoint
+"""
+
+# Only standard Python modules here, for ease of use on clusters
+import glob
+import optparse
+import os
+import shutil
+import sys
+
+# User input
+optionParser = optparse.OptionParser( \
+  usage = "%prog [OPTIONS] DIR", \
+  add_help_option = True, \
+  description = "Copy data files for a QG pickup")
+optionParser.add_option("-n", "--nproc", type = "int", dest = "nproc", help = "Specify the number of processes", default = None)
+optionParser.add_option("-s", "--supplementary", action = "store_true", dest = "supp", help = "Delete supplementary data files", default = False)
+opts, args = optionParser.parse_args()
+
+# The input directory
+if len(args) == 0:
+  sys.stderr.write("Input directory required\n")
+  sys.exit(1)
+elif len(args) == 2:
+  sys.stderr.write("Unexpected trailing argument\n")
+  sys.exit(1)
+elif opts.nproc is None:
+  sys.stderr.write("Number of processes required\n")
+  sys.exit(1)
+elif opts.nproc < 2:
+  sys.stderr.write("Require more than one process\n")
+  sys.exit(1)
+inputDir = args[0]
+
+def ParallelHeaders(inputDir):
+  """
+  Return all parallel header files associated with process zero.
+  """
+  
+  files = glob.glob(os.path.join(inputDir, "qg*_*_s.*"))
+  headers = []
+  for file in files:
+    split = os.path.basename(file).split("_")
+    if not len(split) == 3:
+      continue
+    layers = split[0][2:]
+    jj = split[1]
+    split = split[2].split(".")
+    if not len(split) == 3:
+      continue
+    dump = split[1]
+    proc = split[2]
+    if not layers.isdigit() or not jj.isdigit() or not dump.isdigit() or not proc.isdigit() \
+       or layers.startswith("0") or jj.startswith("0") or (len(dump) > 1 and dump.startswith("0")) or (len(proc) > 1 and proc.startswith("0")):
+      continue
+    layers = int(layers)
+    jj = int(jj)
+    dump = int(dump)
+    proc = int(proc)
+    if not proc == 0:
+      continue
+    i = 0
+    while os.path.exists(os.path.join(inputDir, "qg%i_%i_s.%i.%i" % (layers, jj, dump, i))) \
+      and os.path.exists(os.path.join(inputDir, "qg%i_%i_s.%i.d.%i" % (layers, jj, dump, i))):
+      i += 1
+    if not i == opts.nproc:
+      continue
+    if opts.supp:
+      if not os.path.exists(os.path.join(inputDir, "qg%i_%i_s_supp.%i.0" % (layers, jj, dump))):
+        continue
+      i = 0
+      while os.path.exists(os.path.join(inputDir, "qg%i_%i_s_supp.%i.%i" % (layers, jj, dump, i))) \
+        and os.path.exists(os.path.join(inputDir, "qg%i_%i_s_supp.%i.d.%i" % (layers, jj, dump, i))):
+        i += 1
+      if not i == opts.nproc:
+        continue
+    
+    headers.append((file, layers, jj, dump))
+  
+  return headers
+
+def DeleteFile(file):
+  print "Deleting: " + file
+  os.remove(file)
+  
+  return
+  
+headers = ParallelHeaders(inputDir)
+if len(headers) == 0:
+  sys.stderr.write("No data files found\n")
+  sys.exit(1)
+
+layers = headers[0][1]
+jj = headers[0][2]
+dump = headers[0][3]
+index = 0
+for i, header in enumerate(headers[1:]):
+  if not header[1] == layers or not header[2] == jj:
+    sys.stderr.write("Multiple dimension data files found\n")
+    sys.exit(1)
+  if header[3] > dump:
+    dump = header[3]
+    index = i + 1
+header = headers[index]
+
+files = glob.glob(os.path.join(inputDir, "qg*_*_s.*"))
+for file in files:
+  split = os.path.basename(file).split("_")
+  if not len(split) == 3:
+    continue
+  layers = split[0][2:]
+  jj = split[1]
+  split = split[2].split(".")
+  if not len(split) == 3:
+    continue
+  dump = split[1]
+  proc = split[2]
+  if not layers.isdigit() or not jj.isdigit() or not dump.isdigit() or not proc.isdigit() \
+     or layers.startswith("0") or jj.startswith("0") or (len(dump) > 1 and dump.startswith("0")) or (len(proc) > 1 and proc.startswith("0")):
+    continue
+  if int(dump) == header[3]:
+    continue
+  
+  DeleteFile(file)
+  try:
+    DeleteFile(os.path.join(inputDir, "qg" + layers + "_" + jj + "_s." + dump + ".d." + proc))
+  except OSError:
+    pass
+  if opts.supp:
+    try:
+      DeleteFile(os.path.join(inputDir, "qg" + layers + "_" + jj + "_s_supp." + dump + "." + proc))
+    except OSError:
+      pass
+    try:
+      DeleteFile(os.path.join(inputDir, "qg" + layers + "_" + jj + "_s_supp." + dump + ".d." + proc))
+    except OSError:
+      pass

@@ -1,0 +1,384 @@
+\documentclass[a4paper]{article}
+
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{array}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{listings}
+\usepackage{longtable}
+\usepackage{natbib}
+\usepackage{nicefrac}
+\usepackage{ulem}
+
+\newcommand{\pequod}{PEQUOD}
+\newcommand{\pequodexpanded}{Parallel Quasi-Geostrophic Model}
+\newcommand{\version}{0.9.5-dev}
+
+\begin{document}
+
+\title{Building \pequod\ \version\ dependencies}
+\maketitle
+
+\section{Introduction}
+
+This document gives step-by-step instructions for a ground-up build of \pequod,
+including a build of all model dependencies. It is assumed that a minimal build
+environment is available, including versions of Bash, the GCC C and C++ compilers, m4,
+and GNU make, as well as a number of standard command line utilities such as
+tar, Wget and md5sum. These steps have been tested on a minimal vanilla
+installation of the 64-bit version of Ubuntu 12.04 (Precise
+Pangolin)\footnote{Available from \url{http://www.ubuntu.com}.}, with a small
+number of additional packages installed via:
+\begin{lstlisting}[language = bash, frame = single]
+sudo apt-get install g++ gcc m4 make
+\end{lstlisting}
+
+The instructions in this document download and compile free and open source
+versions of required \pequod\ dependencies. Clusters generally include
+recommended compilers and optimised libraries, and hence these instructions are
+not intended for use on HPC resources.
+
+The steps in this document should be followed in order, and a successful build
+of each dependency should be achieved before moving on to the next section. All
+instructions in this document assume usage of the Bash shell. If using an
+alternative shell, switch to Bash using the command:
+\begin{lstlisting}[language = sh, frame = single]
+bash
+\end{lstlisting}
+
+\section{Working directory}\label{sect:dir}
+
+First, create a working directory:
+\begin{lstlisting}[language = bash, frame = single]
+mkdir -pv $HOME/build/pequod-dependencies
+export PDEP_DIR=$HOME/build/pequod-dependencies
+\end{lstlisting}
+The first command creates the directory \verb+$HOME/build/pequod-dependencies+,
+although you can replace this with any target directory. The second sets an
+environment variable \verb+PDEP_DIR+ pointing at this directory. Note that you
+will need to reset the environment variable \verb+PDEP_DIR+ if you terminate the
+shell session. Next create a download directory, a build directory, and an
+installation directory with:
+\begin{lstlisting}[language = bash, frame = single]
+mkdir -v $PDEP_DIR/src
+mkdir -v $PDEP_DIR/build
+mkdir -v $PDEP_DIR/install
+\end{lstlisting}
+
+Now set the following environment variables:
+\begin{lstlisting}[language = bash, frame = single]
+export LIBRARY_PATH=$PDEP_DIR/install/lib:\
+$PDEP_DIR/install/lib64
+export LD_LIBRARY_PATH=$PDEP_DIR/install/lib:\
+$PDEP_DIR/install/lib64
+\end{lstlisting}
+Note that you will need to reset these environment variables if you
+terminate the shell session.
+
+\section{libgmp}
+
+The GNU Multiple Precision Arithmetic library is available from
+\url{http://gmplib.org/}. Download it using:
+\begin{lstlisting}[language = bash, frame = single]
+cd $PDEP_DIR/src
+wget ftp://ftp.gmplib.org/pub/gmp-5.0.5/gmp-5.0.5.tar.bz2
+\end{lstlisting}
+Verify the download with:
+\begin{lstlisting}[language = bash, frame = single]
+md5sum gmp-5.0.5.tar.bz2
+\end{lstlisting}
+The correct checksum is \verb+041487d25e9c230b0c42b106361055fe+. Extract the
+source files using:
+\begin{lstlisting}[language = bash, frame = single]
+tar -xvf gmp-5.0.5.tar.bz2
+\end{lstlisting}
+Create and change to a build directory:
+\begin{lstlisting}[language = bash, frame = single]
+mkdir -v $PDEP_DIR/build/gmp
+cd $PDEP_DIR/build/gmp
+\end{lstlisting}
+Now configure, compile, and install the library with:
+\begin{lstlisting}[language = bash, frame = single]
+$PDEP_DIR/src/gmp-5.0.5/configure \
+  --prefix=$PDEP_DIR/install
+make
+make install
+\end{lstlisting}
+
+\section{libmpfr}
+
+The GNU MPFR library is available from \url{http://www.mpfr.org/}. Download it
+using:
+\begin{lstlisting}[language = bash, frame = single]
+cd $PDEP_DIR/src
+wget http://www.mpfr.org/mpfr-current/mpfr-3.1.1.tar.bz2
+\end{lstlisting}
+Verify the download with:
+\begin{lstlisting}[language = bash, frame = single]
+md5sum mpfr-3.1.1.tar.bz2
+\end{lstlisting}
+The correct checksum is \verb+e90e0075bb1b5f626c6e31aaa9c64e3b+. Extract the
+source files using:
+\begin{lstlisting}[language = bash, frame = single]
+tar -xvf mpfr-3.1.1.tar.bz2
+\end{lstlisting}
+Create and change to a build directory:
+\begin{lstlisting}[language = bash, frame = single]
+mkdir -v $PDEP_DIR/build/mpfr
+cd $PDEP_DIR/build/mpfr
+\end{lstlisting}
+Now configure, compile, and install the library with:
+\begin{lstlisting}[language = bash, frame = single]
+$PDEP_DIR/src/mpfr-3.1.1/configure \
+  --prefix=$PDEP_DIR/install --with-gmp=$PDEP_DIR/install
+make
+make install
+\end{lstlisting}
+
+\section{libmpc}
+
+Mpc is available from \url{http://www.multiprecision.org/}. Download it using:
+\begin{lstlisting}[language = bash, frame = single]
+cd $PDEP_DIR/src
+wget http://www.multiprecision.org/mpc/download/\
+mpc-1.0.1.tar.gz
+\end{lstlisting}
+Verify the download with:
+\begin{lstlisting}[language = bash, frame = single]
+md5sum mpc-1.0.1.tar.gz
+\end{lstlisting}
+The correct checksum is \verb+b32a2e1a3daa392372fbd586d1ed3679+. Extract the
+source files using:
+\begin{lstlisting}[language = bash, frame = single]
+tar -xvf mpc-1.0.1.tar.gz
+\end{lstlisting}
+Create and change to a build directory:
+\begin{lstlisting}[language = bash, frame = single]
+mkdir -v $PDEP_DIR/build/mpc
+cd $PDEP_DIR/build/mpc
+\end{lstlisting}
+Now configure, compile, and install the library with:
+\begin{lstlisting}[language = bash, frame = single]
+$PDEP_DIR/src/mpc-1.0.1/configure \
+  --prefix=$PDEP_DIR/install \
+  --with-gmp=$PDEP_DIR/install \
+  --with-mpfr=$PDEP_DIR/install
+make
+make install
+\end{lstlisting}
+
+\section{GCC}
+
+The GNU Compiler Collection is available from \url{http://gcc.gnu.org/}.
+Download it using:
+\begin{lstlisting}[language = bash, frame = single]
+cd $PDEP_DIR/src
+wget http://mirrors.kernel.org/gnu/gcc/gcc-4.7.1/\
+gcc-4.7.1.tar.bz2
+\end{lstlisting}
+Verify the download with:
+\begin{lstlisting}[language = bash, frame = single]
+md5sum gcc-4.7.1.tar.bz2
+\end{lstlisting}
+The correct checksum is \verb+933e6f15f51c031060af64a9e14149ff+. Extract the
+source files using:
+\begin{lstlisting}[language = bash, frame = single]
+tar -xvf gcc-4.7.1.tar.bz2
+\end{lstlisting}
+Create and change to a build directory:
+\begin{lstlisting}[language = bash, frame = single]
+mkdir -v $PDEP_DIR/build/gcc
+cd $PDEP_DIR/build/gcc
+\end{lstlisting}
+Now configure, compile, and install GCC with:
+\begin{lstlisting}[language = bash, frame = single]
+$PDEP_DIR/src/gcc-4.7.1/configure \
+  --prefix=$PDEP_DIR/install \
+  --with-gmp=$PDEP_DIR/install \
+  --with-mpfr=$PDEP_DIR/install \
+  --with-mpc=$PDEP_DIR/install \
+  --enable-languages=c,c++,fortran --enable-bootstrap \
+  --disable-multilib
+make boostrap
+make install
+\end{lstlisting}
+Note that the \verb+make bootstrap+ command may take a long time (of order
+hours) to complete.
+
+\subsection{Known issues}
+
+\subsubsection*{64-bit Ubuntu 12.04 (Precise Pangolin)}
+
+The compilation fails to find a header file \verb+bits/predefs.h+. This can be
+worked around by defining environment variables:
+\begin{lstlisting}[language = bash, frame = single]
+export C_INCLUDE_PATH=/usr/include/x86_64-linux-gnu
+export CPLUS_INCLUDE_PATH=/usr/include/x86_64-linux-gnu
+\end{lstlisting}
+The compilation further fails to find a file \verb+crti.o+. This can be worked
+around by updating the \verb+LIBRARY_PATH+ environment variable to:
+\begin{lstlisting}[language = bash, frame = single]
+export LIBRARY_PATH=$PDEP_DIR/install/lib:\
+$PDEP_DIR/install/lib64:/usr/lib/x86_64-linux-gnu
+\end{lstlisting}
+The environment variables should be defined before the \verb+make bootstrap+
+command is executed. The environment variables should be thus defined when
+building all following dependencies.
+
+\section{Open MPI}
+
+Open MPI is available from \url{http://www.open-mpi.org/}. Download it using:
+\begin{lstlisting}[language = bash, frame = single]
+cd $PDEP_DIR/src
+wget http://www.open-mpi.org/software/ompi/v1.6/\
+downloads/openmpi-1.6.2.tar.bz2
+\end{lstlisting}
+Verify the download with:
+\begin{lstlisting}[language = bash, frame = single]
+md5sum openmpi-1.6.2.tar.bz2
+\end{lstlisting}
+The correct checksum is \verb+219754715a8e40beb468bbc8f0b3251a+. Extract the
+source files using:
+\begin{lstlisting}[language = bash, frame = single]
+tar -xvf openmpi-1.6.2.tar.bz2
+\end{lstlisting}
+Create and change to a build directory:
+\begin{lstlisting}[language = bash, frame = single]
+mkdir -v $PDEP_DIR/build/openmpi
+cd $PDEP_DIR/build/openmpi
+\end{lstlisting}
+Now configure, compile, and install Open MPI with:
+\begin{lstlisting}[language = bash, frame = single]
+CC=$PDEP_DIR/install/bin/gcc \
+  CPP=$PDEP_DIR/install/bin/cpp \
+  CXX=$PDEP_DIR/install/bin/g++ \
+  CXXPP=$PDEP_DIR/install/bin/cpp \
+  F77=$PDEP_DIR/install/bin/gfortran \
+  FC=$PDEP_DIR/install/bin/gfortran \
+  $PDEP_DIR/src/openmpi-1.6.2/configure \
+  --prefix=$PDEP_DIR/install
+make
+make install
+\end{lstlisting}
+
+\section{liblapack}
+
+An implementation of LAPACK is available from \url{http://www.netlib.org/lapack/}.
+Download it using:
+\begin{lstlisting}[language = bash, frame = single]
+cd $PDEP_DIR/src
+wget http://www.netlib.org/lapack/lapack-3.4.1.tgz
+\end{lstlisting}
+Verify the download with:
+\begin{lstlisting}[language = bash, frame = single]
+md5sum lapack-3.4.1.tgz
+\end{lstlisting}
+The correct checksum is \verb+44c3869c38c8335c2b9c2a8bb276eb55+. Extract the
+source files using:
+\begin{lstlisting}[language = bash, frame = single]
+tar -xvf lapack-3.4.1.tgz
+\end{lstlisting}
+Create and change to a build directory:
+\begin{lstlisting}[language = bash, frame = single]
+cp -rv $PDEP_DIR/src/lapack-3.4.1 $PDEP_DIR/build/lapack
+cd $PDEP_DIR/build/lapack
+\end{lstlisting}
+Create a \verb+make.inc+ file:
+\begin{lstlisting}[language = bash, frame = single]
+cp -v make.inc.example make.inc
+\end{lstlisting}
+Edit the \verb+make.inc+ file so that the following variables have the indicated
+values:
+\begin{lstlisting}[language = bash, frame = single]
+FORTRAN  = $(PDEP_DIR)/install/bin/mpif90
+LOADER   = $(PDEP_DIR)/install/bin/mpif90
+CC = $(PDEP_DIR)/install/bin/mpicc
+\end{lstlisting}
+Compile the library with:
+\begin{lstlisting}[language = bash, frame = single]
+make blaslib all
+\end{lstlisting}
+Install the library with:
+\begin{lstlisting}[language = bash, frame = single]
+cp -v librefblas.a $PDEP_DIR/install/lib/libblas.a
+cp -v liblapack.a $PDEP_DIR/install/lib
+\end{lstlisting}
+
+\section{Compiling \pequod}
+
+In order to compile \pequod\ the following environment variables must be set:
+\begin{lstlisting}[language = bash, frame = single]
+export MPI_DIR=$PDEP_DIR/install
+export LD_LIBRARY_PATH=$PDEP_DIR/install/lib:\
+$PDEP_DIR/install/lib64
+export LIBRARY_PATH=$PDEP_DIR/install/lib:\
+$PDEP_DIR/install/lib64
+\end{lstlisting}
+
+These can be set in your \verb+.bashrc+ file by adding the lines:
+\begin{lstlisting}[language = bash, frame = single]
+export MPI_DIR=$HOME/build/pequod-dependencies/install
+if [ -z "${LD_LIBRARY_PATH}" ]; then
+  export LD_LIBRARY_PATH=\
+$HOME/build/pequod-dependencies/install/lib:\
+$HOME/build/pequod-dependencies/install/lib64
+else
+  export LD_LIBRARY_PATH=\
+$HOME/build/pequod-dependencies/install/lib:\
+$HOME/build/pequod-dependencies/install/lib64:\
+$LD_LIBRARY_PATH
+fi
+if [ -z "${LIBRARY_PATH}" ]; then
+  export LIBRARY_PATH=\
+$HOME/build/pequod-dependencies/install/lib:\
+$HOME/build/pequod-dependencies/install/lib64
+else
+  export LIBRARY_PATH=\
+$HOME/build/pequod-dependencies/install/lib:\
+$HOME/build/pequod-dependencies/install/lib64:\
+$LIBRARY_PATH
+fi
+\end{lstlisting}
+The directory \verb+$HOME/build/pequod-dependencies+ should be replaced with the
+directory created in section \ref{sect:dir}.
+
+In the \pequod\ source directory, edit \verb+makefile.gfortran+ and remove the
+\verb+-floop-interchange+, \verb+-floop-strip-mine+, and \verb+-floop-block+
+flags from the \verb+OPTIMISATION+ variable. The \verb+LIBS+ variable should be
+set to:
+\begin{lstlisting}[language = bash, frame = single]
+LIBS = -llapack -lblas
+\end{lstlisting}
+Ensure that \verb+makefile.compiler+ includes \verb+makefile.gfortran+.
+
+\pequod\ can now be configured and compiled as described in the getting
+started guide and the \pequod\ manual. Note that, when running in parallel,
+if \verb+$PDEP_DIR/install/bin+ is not included in the \verb+PATH+ environment
+variable then you should include the full path to \verb+mpi_run+. For example,
+when running \pequod\ on 4 processes, use the command:
+\begin{lstlisting}[language = bash, frame = single]
+$MPI_DIR/bin/mpirun -np 4 ./qg3
+\end{lstlisting}
+
+\subsection{Known issues}
+
+\subsubsection*{64-bit Ubuntu 12.04 (Precise Pangolin)}
+
+The compilation fails to find a file \verb+crti.o+. This can be worked
+around by setting the \verb+LIBRARY_PATH+ environment variable to:
+\begin{lstlisting}[language = bash, frame = single]
+export LIBRARY_PATH=$PDEP_DIR/install/lib:\
+$PDEP_DIR/install/lib64:/usr/lib/x86_64-linux-gnu
+\end{lstlisting}
+If modifying your \verb+.bashrc+ file, add:
+\begin{lstlisting}[language = bash, frame = single]
+export LIBRARY_PATH=$LIBRARY_PATH:\
+/usr/lib/x86_64-linux-gnu
+\end{lstlisting}
+after all the lines indicated above.
+
+%\bibliography{bibliography}
+%\bibliographystyle{plainnat}
+
+\end{document}

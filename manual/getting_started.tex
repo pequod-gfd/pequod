@@ -1,0 +1,119 @@
+\documentclass[a4paper]{article}
+
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{array}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{listings}
+\usepackage{longtable}
+\usepackage{natbib}
+\usepackage{nicefrac}
+\usepackage{ulem}
+
+\newcommand{\pequod}{PEQUOD}
+\newcommand{\pequodexpanded}{Parallel Quasi-Geostrophic Model}
+\newcommand{\version}{0.9.5-dev}
+
+\begin{document}
+
+\title{Getting started with \pequod\ \version}
+\maketitle
+
+\section{Introduction}
+
+This document gives step-by-step instructions for getting started with \pequod.
+Specifically, these steps enable one to compile and run \pequod\ on a vanilla
+installation of Ubuntu 12.04 (Precise Pangolin)\footnote{Available from
+\url{http://www.ubuntu.com}.}. Detailed instructions concerning the
+configuration and usage of \pequod\ can be found in the more comprehensive
+manual.
+
+\section{Dependencies}
+
+\pequod\ has a small number of required dependencies. Packages required to
+compile the model with the gfortran compiler can be installed via:
+\begin{lstlisting}[language = bash, frame = single]
+sudo apt-get install gfortran make libcloog-ppl0 \
+  liblapack-dev libopenmpi-dev openmpi-bin
+\end{lstlisting}
+Packages required to build the manual can be installed via:
+\begin{lstlisting}[language = bash, frame = single]
+sudo apt-get install texlive texlive-latex-extra
+\end{lstlisting}
+
+\section{Building the manual}
+
+In the \pequod\ root directory the manual is compiled with the command:
+\begin{lstlisting}[language = bash, frame = single]
+make manual
+\end{lstlisting}
+and can be viewed with the command:
+\begin{lstlisting}[language = bash, frame = single]
+evince manual/manual.pdf
+\end{lstlisting}
+
+\section{Running the model in serial}
+
+The source files supplied with \pequod\ are configured to use the gfortran
+compiler, with a low resolution three-layer wind-driven double gyre model
+configuration. The model makefiles require that the MPI directory be specified
+via the \verb+MPI_DIR+ environment variable. This can be set via the command:
+\begin{lstlisting}[language = bash, frame = single]
+export MPI_DIR=/usr
+\end{lstlisting}
+The model is compiled with (executed in the \pequod\ root directory):
+\begin{lstlisting}[language = bash, frame = single]
+make qg3
+\end{lstlisting}
+and can be run with:
+\begin{lstlisting}[language = bash, frame = single]
+./qg3
+\end{lstlisting}
+
+\section{Running the model in parallel}
+
+The model can be run in parallel by specifying a domain decomposition in
+\verb+qg3p_params.F90+ (see the manual for full details). As an example, if
+one replaces the lines:
+\begin{lstlisting}[language = bash, frame = single]
+  ! Grid
+  integer, parameter :: layers = 3
+  integer, parameter, dimension(1) :: iis = (/257/)
+  integer, parameter, dimension(1) :: jjs = (/257/)
+  ! The maximum grid size over all processes
+  integer, parameter :: ii_m = 257, jj_m = 257
+\end{lstlisting}
+with:
+\begin{lstlisting}[language = bash, frame = single]
+  ! Grid
+  integer, parameter :: layers = 3
+  integer, parameter, dimension(1) :: iis = (/257/)
+  integer, parameter, dimension(2) :: jjs = (/128, 129/)
+  ! The maximum grid size over all processes
+  integer, parameter :: ii_m = 257, jj_m = 129
+\end{lstlisting}
+then after recompiling the model:
+\begin{lstlisting}[language = bash, frame = single]
+make qg3
+\end{lstlisting}
+the model can be run on two processes with:
+\begin{lstlisting}[language = bash, frame = single]
+$MPI_DIR/bin/mpirun -np 2 ./qg3
+\end{lstlisting}
+
+\section{Configuring the model}
+
+The model is primarily configured via preprocessor definitions in the
+\verb+config.h+ header file, and Fortran parameters in the
+\verb+qg3p_params.F90+ source file. Full details of the configuration of the
+model via these files are given in the manual. Note that the model must be
+recompiled after any modification to these source files with:
+\begin{lstlisting}[language = bash, frame = single]
+make qg3
+\end{lstlisting}
+
+%\bibliography{bibliography}
+%\bibliographystyle{plainnat}
+
+\end{document}

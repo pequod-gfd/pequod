@@ -1,0 +1,23 @@
+FC = $(MPI_DIR)/bin/mpif90
+
+INCLUDES = #-I$(PETSC_DIR)/$(PETSC_ARCH)/include -I$(PETSC_DIR)/include
+LIBS = -latlas -lblas -lf77blas -llapack #-L$(PETSC_DIR)/$(PETSC_ARCH)/lib -lpetsc -lX11
+
+DEBUG = -O0 -g -fbounds-check -finit-integer=-666 -finit-real=nan
+FLAGS = -fdefault-real-8 -fdefault-double-8 -Wall -pipe -std=f2003
+OPTIMISATION = -O3 -ftree-loop-distribution -funroll-loops -ffast-math \
+  -fpack-derived
+# The following has been observed to lead to memory errors on newton (x86_64)
+# -frepack-arrays
+# The following cannot be used on the MacPorts version of gcc 4.4
+# -floop-interchange -floop-strip-mine -floop-block
+# The following leads to compiler errors on Mac OS X 10.6, running on a MacBook
+# Pro
+# -march=native -mtune=native 
+LDOPTIMISATION = $(OPTIMISATION)
+
+FCFLAGS = $(OPTIMISATION) $(FLAGS) -ffree-line-length-none -DNDEBUG $(DEFINES) $(INCLUDES)
+#FCFLAGS = $(DEBUG) $(FLAGS) -ffree-line-length-none -DDDEBUG $(DEFINES) $(INCLUDES)
+
+LD = $(FC)
+LDFLAGS = $(LDOPTIMISATION)
