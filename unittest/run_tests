@@ -1,6 +1,6 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 #
-# James Maddison
+# James Maddison, Jo Wayne Tan
 
 import glob
 import os
@@ -14,18 +14,19 @@ else:
   tests = glob.glob(os.path.join(path, "test_*"))
 
 def TestNProcs(test):
-  try:
-    handle = open(test + ".F90", "r")
-  except IOError:
-    sys.stderr.write("WARNING: Test " + test + " source file not found\n")
-    return 1
-    
   nprocs = 1
-  for line in handle.readlines():
-    if line.startswith("!!NP") and len(line.split()) == 2:
-      nprocs = int(line.split()[1])
-  
+  try:
+    with open(test + ".F90", "r") as handle:
+      for line in handle:
+        if line.startswith("!!NP") and len(line.split()) == 2:
+          nprocs = int(line.split()[1])
+  except OSError:
+    sys.stderr.write("WARNING: Test " + test + " source file not found\n")
   return nprocs
+
+mpi_dir = os.environ.get("MPI_DIR")
+mpirun = os.path.join(mpi_dir, "bin", "mpirun") if mpi_dir else "mpirun"
+opts = os.environ.get("PETSC_OPTS", "").split()
 
 nPasses = 0
 nFails = 0
@@ -40,23 +41,13 @@ for test in tests:
   sys.stdout.flush()
   
   nprocs = TestNProcs(test)
-  if "PETSC_OPTS" in os.environ:
-    opts = " " + os.environ["PETSC_OPTS"]
-  else:
-    opts = ""
-  if nprocs > 1:
-    proc = subprocess.Popen((os.path.join(os.environ["MPI_DIR"], "bin", "mpirun") + " -np " + str(nprocs) + " " + os.path.join(os.path.curdir, test) + opts).split(), stdout = subprocess.PIPE)
-  else:
-    proc = subprocess.Popen((os.path.join(os.path.curdir, test) + opts).split(), stdout = subprocess.PIPE)
-  proc.wait()
-  output = proc.stdout.readlines()
-  
+  command = [mpirun, "-np", str(nprocs), os.path.abspath(test)] + opts
+  proc = subprocess.run(command, stdout=subprocess.PIPE, text=True)
+
   failLines = []
-  if proc.returncode == 0:    
-    print "COMPLETE"
-  
-    failed = False
-    for line in output:
+  if proc.returncode == 0:
+    print("COMPLETE")
+    for line in proc.stdout.splitlines(keepends=True):
       sys.stdout.write(line)
       split = line.split()
       if len(split) > 0:
@@ -65,24 +56,25 @@ for test in tests:
         elif split[-1].lower() == "fail":
           failLines.append(line)
   else:
-    print "ERROR"
+    print("ERROR")
+    sys.stdout.write(proc.stdout)
     failLines = ["ERROR\n"]
   
   if len(failLines) > 0:
     fails.append((test, failLines))
     nFails += len(failLines)
        
-print "==================="
-print "=== Test output ==="
-print "==================="
-print "Passes: " + str(nPasses)
-print "Fails:  " + str(nFails)
+print("===================")
+print("=== Test output ===")
+print("===================")
+print("Passes: " + str(nPasses))
+print("Fails:  " + str(nFails))
 if len(fails) > 0:
-  print "================"
-  print "=== Failures ==="
-  print "================"
+  print("================")
+  print("=== Failures ===")
+  print("================")
   for test, failLines in fails:
-    print test + ":"
+    print(test + ":")
     for line in failLines:
       sys.stdout.write(line)
 

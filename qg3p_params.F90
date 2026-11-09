@@ -41,7 +41,7 @@ module qg_parameters
   ! Simulation start time in days when using START_TIME_MANUAL
   real(kind = real_8) :: start_time_override = huge(0.0D0)
   ! Time in days for spinup (no output) and run time
-  real(kind = real_8), parameter :: max_spin = 0.0D0, max_time = 365.0D0 * 10.0D0
+  real(kind = real_8), parameter :: max_spin = 0.0D0, max_time = 365.0D0 * 1.0D0
   
   ! Physical parameters
   real(kind = real_8), parameter :: basinscale = 3840.0D5
@@ -78,7 +78,7 @@ module qg_parameters
   ! dump file is written to every k_dump * k_save days, and a full checkpoint
   ! is written every k_cp * k_save days. The latter applies only when using
   ! CABARET.
-  integer, parameter :: k_save = 365, k_dump = 10, k_cp = 10
+  integer, parameter :: k_save = 1, k_dump = 1, k_cp = 10
   ! Enable quadratic term diagnostics
   logical, parameter :: quad = .false.
   ! Input / output unit
