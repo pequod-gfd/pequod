@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 #
 # James Maddison
 
@@ -52,7 +52,7 @@ def ReadFloat(handle, iBytes = 4, rBytes = 8):
 
   arr = IntArray(bytes = iBytes)
   arr.fromfile(handle, 1)
-  nFloats = arr[0] / rBytes
+  nFloats = arr[0] // rBytes
 
   arr = FloatArray(bytes = rBytes)
   arr.fromfile(handle, nFloats)
@@ -189,6 +189,16 @@ for p in range(n):
     handle = open(filename, "rb")
   except IOError:
     Error("File not found: %s" % filename)
+
+  # Preserve the single-snapshot export by selecting the last frame in the dump.
+  frameBytes = 0
+  for field in data:
+    count = 1 if field.ndim == 1 else ii * jj * int(numpy.prod(field.shape[2:], dtype=int))
+    frameBytes += 8 + 8 * count
+  handle.seek(0, 2)
+  if handle.tell() < frameBytes or handle.tell() % frameBytes != 0:
+    Error("Incomplete snapshot data: %s" % filename)
+  handle.seek(-frameBytes, 2)
 
   # Read the process p data
   for i, name in enumerate(names):

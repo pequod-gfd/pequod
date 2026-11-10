@@ -40,7 +40,7 @@ program qg3
   integer :: i, j, layer
   integer :: day_number, dump_count, last_diagnostics_day, last_dump_day, &
     & s_index
-  logical :: exit_timestep_loop
+  logical :: exit_timestep_loop, new_dump
   real(kind = real_8) :: diagnostic_time, model_time, model_time_day, &
     & start_time, start_time_day
 
@@ -829,12 +829,13 @@ program qg3
       last_dump_day = day_number
       dump_count = dump_count + 1
 
-      if(mod(dump_count, k_dump) == 1 .or. k_dump == 1) then
+      new_dump = mod(dump_count - 1, k_dump) == 0
+      if(new_dump) then
         s_index = s_index + 1
         call write_s_header(decomp, s_index, l_scale, t_scale)
       end if
       call open_parallel_data(decomp, unit, "qg" // int2str(layers) // "_" // int2str(decomp%g_ii) // "_s", &
-        & output_index = s_index)
+        & output_index = s_index, append = .not. new_dump)
       call write_unformatted(unit, model_time_day)
       call write_unformatted(unit, start_time_day + model_time_day)
       do layer = 1, layers

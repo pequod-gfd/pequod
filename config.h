@@ -20,10 +20,10 @@
 #define FORWARD_EULER_START
 
 ! Elliptic solver options
-#define PH1D
-#define PH1D_BUFFER
+#undef PH1D
+#undef PH1D_BUFFER
 #undef INTERMEDIATE_TRANSPOSES
-#undef PETSC
+#define PETSC
 #undef SUPERLU_DIST
 
 #endif

@@ -220,7 +220,8 @@ contains
 #endif
     
     character(len = FILENAME_LEN) :: filename
-    integer :: layer, layers, stat
+    integer :: layer, layers, stat, marker_size, scalar_size, field_size
+    integer(kind = selected_int_kind(18)) :: file_size, snapshot_size
     real(kind = real_8) :: model_time_day
     type(decomposition), pointer :: decomp
 #ifdef CABARET
@@ -259,6 +260,20 @@ contains
       labort("Failed to open input file")
     end if
     
+    ! Each dump can contain several snapshots. Pick up from the last one.
+    inquire(iolength = marker_size) 0, 0
+    inquire(iolength = scalar_size) model_time_day
+#ifdef CABARET
+    inquire(iolength = field_size) psi%sdata(:, :, 1)
+#else
+    inquire(iolength = field_size) psi(1)%sdata(:, :, 1), psi(2)%sdata(:, :, 1)
+#endif
+    snapshot_size = 2 * (scalar_size + marker_size) + 2 * int(layers, kind(snapshot_size)) * (field_size + marker_size)
+    inquire(unit, size = file_size)
+    if(file_size < snapshot_size .or. mod(file_size, snapshot_size) /= 0) then
+      labort("Invalid snapshot file size")
+    end if
+    read(unit, pos = file_size - snapshot_size + 1)
     call read_unformatted(unit, model_time_day)
     call read_unformatted(unit, total_time_day)
 #ifdef CABARET
@@ -402,20 +417,29 @@ contains
   end subroutine open_parallel_header
   
   ! Open a parallel data file.
-  subroutine open_parallel_data(decomp, unit, filename, output_index)
+  subroutine open_parallel_data(decomp, unit, filename, output_index, append)
     type(decomposition), intent(in) :: decomp
     integer, intent(in) :: unit
     character(len = *), intent(in) :: filename
     integer, optional, intent(in) :: output_index
+    logical, optional, intent(in) :: append
     
     character(len = filename_len) :: lfilename
     integer :: ierr
+    logical :: append_data
     
     lfilename = filename
     if(present(output_index)) lfilename = trim(lfilename) // "." // int2str(output_index)
     lfilename = parallel_filename(trim(lfilename) // ".d", decomp)
     
-    open(unit, file = trim(lfilename), access = "stream", form = "unformatted", status = "replace",  iostat = ierr)
+    append_data = .false.
+    if(present(append)) append_data = append
+    if(append_data) then
+      open(unit, file = trim(lfilename), access = "stream", form = "unformatted", status = "old", &
+        & position = "append", iostat = ierr)
+    else
+      open(unit, file = trim(lfilename), access = "stream", form = "unformatted", status = "replace", iostat = ierr)
+    end if
     if(ierr /= 0) then
       labort("Failed to open output data file: " // trim(lfilename))
     end if

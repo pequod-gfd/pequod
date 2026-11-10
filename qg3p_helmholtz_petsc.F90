@@ -5,11 +5,8 @@
 ! Helmholtz solver routines for the 3D QG model.
 module qg_helmholtz_petsc
 
-  use petsc
+#include "petsc/finclude/petscksp.h"
   use petscksp
-  use petscmat
-  use petscpc
-  use petscvec
 
   use qg_laplace_bc
   use qg_parallel
@@ -18,11 +15,6 @@ module qg_helmholtz_petsc
   implicit none
   
 #include "petscconf.h"
-#include "petscversion.h"
-#include "finclude/petsckspdef.h"
-#include "finclude/petscmatdef.h"
-#include "finclude/petscpcdef.h"
-#include "finclude/petscvecdef.h"
 
   private
   
@@ -131,12 +123,8 @@ contains
       ! \left( \partial_{xx} + \partial_{yy} - ss_i \right), discretised using
       ! finite differencing with dx = dy = 1 and with a boundary condition of
       ! psi = 0 on all boundaries
-#if PETSC_VERSION_MAJOR >= 3 && PETSC_VERSION_MINOR >= 3
       call MatCreateAIJ(PETSC_COMM_WORLD, m_ii, m_ii, g_m_ii, g_m_ii, nnz(1), nnz, nnz(1), nnz, hmats%matrix(layer), ierr);  assert(ierr == 0)
       call MatSetUp(hmats%matrix(layer), ierr);  assert(ierr == 0)
-#else
-      call MatCreateMPIAIJ(PETSC_COMM_WORLD, m_ii, m_ii, g_m_ii, g_m_ii, nnz(1), nnz, nnz(1), nnz, hmats%matrix(layer), ierr);  assert(ierr == 0)
-#endif
       do i = 1, decomp%ii2
         do j = 1, decomp%jj2
           if(decomp%p_b >= 0 .or. i > 1)          call MatSetValue(hmats%matrix(layer), grid_ix(decomp, i, j), grid_ix(decomp, i - 1, j),     -1.0D0, ADD_VALUES, ierr);  assert(ierr == 0)
@@ -151,7 +139,7 @@ contains
     
       ! Configure the linear solver      
       call KSPCreate(PETSC_COMM_WORLD, hmats%ksp(layer), ierr);  assert(ierr == 0)
-      call KSPSetOperators(hmats%ksp(layer), hmats%matrix(layer), hmats%matrix(layer), SAME_PRECONDITIONER, ierr);  assert(ierr == 0)
+      call KSPSetOperators(hmats%ksp(layer), hmats%matrix(layer), hmats%matrix(layer), ierr);  assert(ierr == 0)
       call KSPGetPC(hmats%ksp(layer), hmats%pc(layer), ierr);  assert(ierr == 0)
       call PCSetType(hmats%pc(layer), pc_type, ierr);  assert(ierr == 0)
       if(pc_type == "hypre") then
@@ -209,13 +197,8 @@ contains
         lix(index) = index - 1
       end do
     end do
-#if PETSC_VERSION_MAJOR >= 3 && PETSC_VERSION_MINOR >= 2
-    call ISCreateGeneral(PETSC_COMM_SELF, m_ii, gix, PETSC_USE_POINTER, hmats%gis, ierr);  assert(ierr == 0)
-    call ISCreateGeneral(PETSC_COMM_SELF, m_ii, lix, PETSC_USE_POINTER, hmats%lis, ierr);  assert(ierr == 0)
-#else
-    call ISCreateGeneral(PETSC_COMM_SELF, m_ii, gix, hmats%gis, ierr);  assert(ierr == 0)
-    call ISCreateGeneral(PETSC_COMM_SELF, m_ii, lix, hmats%lis, ierr);  assert(ierr == 0)
-#endif
+    call ISCreateGeneral(PETSC_COMM_SELF, m_ii, gix, PETSC_COPY_VALUES, hmats%gis, ierr);  assert(ierr == 0)
+    call ISCreateGeneral(PETSC_COMM_SELF, m_ii, lix, PETSC_COPY_VALUES, hmats%lis, ierr);  assert(ierr == 0)
     call VecScatterCreate(hmats%soln, hmats%gis, hmats%lsoln, hmats%lis, hmats%scatter, ierr);  assert(ierr == 0)
           
   end subroutine allocate_helmholtz_matrices
@@ -292,9 +275,9 @@ contains
       call KSPGetConvergedReason(hmats%ksp(layer), reason, ierr);  assert(ierr == 0)
       call KSPGetIterationNumber(hmats%ksp(layer), its, ierr);  assert(ierr == 0)
       write(6, "(a,"//real_8_chr//")") "For ss = ", hmats%ss(layer)
-      write(6, "(a,i0)") "Convergence reason: ", reason
+      write(6, "(a,i0)") "Convergence reason: ", reason%v
       write(6, "(a,i0)") "Iterations: ", its
-      if(reason <= 0) then
+      if(reason%v <= 0) then
         labort("Convergence failure")
       end if
        

@@ -50,31 +50,37 @@ def read_record(stream, count):
     return np.frombuffer(data, dtype="<f8")
 
 
-def read_tile(data_path, descriptions, tile):
+def field_levels(header, descriptions):
+    levels = []
+    for name, description in zip(FIELD_NAMES, descriptions, strict=True):
+        dimensions = description.split()
+        if dimensions == [name, "ii", "jj"]:
+            levels.append(1)
+        elif dimensions == [name, "ii", "jj", "leapfrog"]:
+            levels.append(2)
+        else:
+            raise ValueError(f"{header}: unexpected field description {description!r}")
+    return levels
+
+
+def read_tile(data_path, levels, tile, offset):
     ni, nj = tile.shape[1:]
+    count = ni * nj
     with data_path.open("rb") as stream:
+        stream.seek(offset)
         times = (read_record(stream, 1)[0], read_record(stream, 1)[0])
-        for field, name, description in zip(
-            tile, FIELD_NAMES, descriptions, strict=True
-        ):
-            if description.split() == [name, "ii", "jj"]:
-                levels = 1
-            elif description.split() == [name, "ii", "jj", "leapfrog"]:
-                levels = 2
-            else:
-                raise ValueError(f"{data_path}: unexpected field description {description!r}")
-            values = read_record(stream, ni * nj * levels)
+        for field, level in zip(tile, levels, strict=True):
+            values = read_record(stream, count * level)
             # Centred runs store the previous level first and the current level last.
-            field[:] = values[-ni * nj :].reshape((ni, nj), order="F")
-        if stream.read(1):
-            raise ValueError(f"{stream.name}: unexpected data after the snapshot")
+            field[:] = values[-count:].reshape((ni, nj), order="F")
     return times
 
 
-def read_snapshot(headers):
+def read_dump(headers):
     grid = None
-    times = None
+    frame_count = None
     seen_ranks = set()
+    tiles = []
     for header in headers:
         lines = header.read_text().splitlines()
         if len(lines) != 12 or lines[4:6] != ["model_time_day", "total_time_day"]:
@@ -102,7 +108,6 @@ def read_snapshot(headers):
         tile_grid = (ni, nj, spacing_km, nprocs)
         if grid is None:
             grid = tile_grid
-            fields = np.empty((len(FIELD_NAMES), ni, nj))
             filled = np.zeros((ni, nj), dtype=bool)
         elif grid != tile_grid:
             raise ValueError(f"{header}: global grid metadata differs between ranks")
@@ -119,30 +124,50 @@ def read_snapshot(headers):
             data_path = header.with_name(f"{header.name}.d")
         else:
             data_path = header.with_name(f"{header.stem}.d.{rank_suffix}")
-        tile_times = read_tile(data_path, lines[6:], fields[:, rows, columns])
-        if not np.isfinite(tile_times).all() or (times is not None and times != tile_times):
-            raise ValueError(f"{data_path}: invalid or inconsistent snapshot times")
-        times = tile_times
+        levels = field_levels(header, lines[6:])
+        # Two scalar time records, then one record for each field.
+        frame_size = 32 + sum(8 + 8 * local_ni * local_nj * level for level in levels)
+        count, remainder = divmod(data_path.stat().st_size, frame_size)
+        if not count or remainder:
+            raise ValueError(f"{data_path}: incomplete snapshot data")
+        if frame_count is not None and frame_count != count:
+            raise ValueError(f"{data_path}: ranks have different numbers of snapshots")
+        frame_count = count
+        tiles.append((data_path, rows, columns, levels, frame_size))
         covered[:] = True
 
     if not filled.all():
         raise ValueError(f"{headers[0]}: rank tiles do not cover the full grid")
-    return times[1], fields.reshape(2, 3, ni, nj), spacing_km
+    for index in range(frame_count):
+        fields = np.empty((len(FIELD_NAMES), ni, nj))
+        times = None
+        for data_path, rows, columns, levels, frame_size in tiles:
+            tile_times = read_tile(data_path, levels, fields[:, rows, columns], index * frame_size)
+            if not np.isfinite(tile_times).all() or (times is not None and times != tile_times):
+                raise ValueError(f"{data_path}: invalid or inconsistent snapshot times")
+            times = tile_times
+        yield times[1], fields.reshape(2, 3, ni, nj), spacing_km
+
+
+def read_frames(snapshots):
+    for headers in snapshots:
+        for day, fields, spacing_km in read_dump(headers):
+            yield headers[0], day, fields, spacing_km
 
 
 def make_outputs(run_dir, snapshots, fps):
     limits = np.zeros(2)
     grid = None
-    for snapshot in snapshots:
-        day, fields, spacing_km = read_snapshot(snapshot)
+    for count, (source, day, fields, spacing_km) in enumerate(read_frames(snapshots), 1):
         frame_grid = (fields.shape[2:], spacing_km)
         if grid is not None and frame_grid != grid:
-            raise ValueError(f"{snapshot[0]}: grid changed between snapshots")
+            raise ValueError(f"{source}: grid changed between snapshots")
         grid = frame_grid
         limits = np.maximum(limits, np.max(np.abs(fields), axis=(1, 2, 3)))
         if not np.isfinite(limits).all():
-            raise ValueError(f"{snapshot[0]}: contains non-finite field values")
+            raise ValueError(f"{source}: contains non-finite field values")
     limits[limits == 0] = 1
+    print(f"Rendering {count} snapshots", flush=True)
 
     (ni, nj), spacing_km = grid
     west, east = 0, (nj - 1) * spacing_km
@@ -181,8 +206,7 @@ def make_outputs(run_dir, snapshots, fps):
             mp4 = Path(temp) / "fields.mp4"
             fig.savefig(png, dpi=150)
             with writer.saving(fig, mp4, dpi=100):
-                for snapshot in snapshots:
-                    day, fields, _ = read_snapshot(snapshot)
+                for _, day, fields, _ in read_frames(snapshots):
                     title.set_text(f"PEQUOD | Model day {day:.2f}")
                     for image, field in zip(images, fields.reshape(6, ni, nj), strict=True):
                         image.set_data(field)
@@ -208,7 +232,7 @@ def main():
     run_dir = args.run_dir.expanduser().resolve()
     try:
         snapshots = find_snapshots(run_dir)
-        print(f"Rendering {len(snapshots)} snapshots from {run_dir}", flush=True)
+        print(f"Reading {len(snapshots)} snapshot files or rank groups from {run_dir}", flush=True)
         make_outputs(run_dir, snapshots, args.fps)
     except (OSError, ValueError, CalledProcessError) as exc:
         parser.exit(1, f"{parser.prog}: {exc}\n")

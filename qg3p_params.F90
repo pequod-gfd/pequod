@@ -13,10 +13,10 @@ module qg_parameters
   
   ! Grid
   integer, parameter :: layers = 3
-  integer, parameter, dimension(1) :: iis = (/257/)
-  integer, parameter, dimension(1) :: jjs = (/257/)
+  integer, parameter, dimension(2) :: iis = (/128, 129/)
+  integer, parameter, dimension(2) :: jjs = (/128, 129/)
   ! The maximum grid size over all processes
-  integer, parameter :: ii_m = 257, jj_m = 257
+  integer, parameter :: ii_m = 129, jj_m = 129
   
   ! Periodic (in longitude) channel geometry?
   logical, parameter :: periodic = .false.
@@ -26,7 +26,7 @@ module qg_parameters
 #ifdef CABARET
   logical, parameter :: adapt_dt = .true.
   real(kind = real_8), parameter :: max_dt = 86400.0D0, max_dt_increase = 1.5D0
-  real(kind = real_8), parameter :: target_cfl = 0.1D0
+  real(kind = real_8), parameter :: target_cfl = 0.4D0
 #else
   ! Leapfrog filter weights
   real(kind = real_8), parameter :: ra_nu = 0.02D0
@@ -41,7 +41,7 @@ module qg_parameters
   ! Simulation start time in days when using START_TIME_MANUAL
   real(kind = real_8) :: start_time_override = huge(0.0D0)
   ! Time in days for spinup (no output) and run time
-  real(kind = real_8), parameter :: max_spin = 0.0D0, max_time = 365.0D0 * 1.0D0
+  real(kind = real_8), parameter :: max_spin = 0.0D0, max_time = 1.0D0 * 10.0D0
   
   ! Physical parameters
   real(kind = real_8), parameter :: basinscale = 3840.0D5

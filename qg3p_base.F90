@@ -5,14 +5,13 @@ module qg_parallel
 
   use qg_parameters, only : real_8
   use test_tools
+#ifdef PETSC
+  use petscsys, only : PetscInitialize, PetscFinalize, PETSC_NULL_CHARACTER
+#endif
 
   implicit none
 
-#ifdef PETSC
-#include "finclude/petscsys.h"
-#else
   include "mpif.h"
-#endif
   
   private
   
