@@ -4,6 +4,7 @@
 import argparse
 from pathlib import Path
 import re
+import runpy
 import struct
 from subprocess import CalledProcessError
 from tempfile import TemporaryDirectory
@@ -155,6 +156,19 @@ def read_frames(snapshots):
             yield headers[0], day, fields, spacing_km
 
 
+def read_cape_mask(run_dir, shape, spacing_km):
+    path = run_dir / "cape_geometry.dat"
+    if not path.is_file():
+        return False
+    geometry_reader = runpy.run_path(str(Path(__file__).resolve().parents[1] / "scripts/qg_irregular"))
+    geometry = geometry_reader["Geometry"].read(path)
+    grid = geometry.grid
+    if ((grid.ni, grid.nj) != shape or grid.units != "cm"
+            or not np.isclose(grid.h / 100_000, spacing_km, rtol=1e-12, atol=0)):
+        raise ValueError(f"{path}: geometry grid does not match the snapshots")
+    return geometry.nodes[:, :, 0] == geometry_reader["SOLID"]
+
+
 def make_outputs(run_dir, snapshots, fps):
     limits = np.zeros(2)
     grid = None
@@ -170,6 +184,9 @@ def make_outputs(run_dir, snapshots, fps):
     print(f"Rendering {count} snapshots", flush=True)
 
     (ni, nj), spacing_km = grid
+    land = read_cape_mask(run_dir, (ni, nj), spacing_km)
+    cmap = plt.get_cmap("RdBu_r").copy()
+    cmap.set_bad("0.8")
     west, east = 0, (nj - 1) * spacing_km
     south, north = 0, (ni - 1) * spacing_km
     half_cell = spacing_km / 2
@@ -181,7 +198,7 @@ def make_outputs(run_dir, snapshots, fps):
     for row, (label, limit) in enumerate(zip(ROW_LABELS, limits, strict=True)):
         for col, ax in enumerate(axes[row]):
             image = ax.imshow(
-                fields[row, col], cmap="RdBu_r", vmin=-limit, vmax=limit,
+                np.ma.array(fields[row, col], mask=land), cmap=cmap, vmin=-limit, vmax=limit,
                 origin="upper", extent=extent, interpolation="nearest",
             )
             images.append(image)
@@ -209,7 +226,7 @@ def make_outputs(run_dir, snapshots, fps):
                 for _, day, fields, _ in read_frames(snapshots):
                     title.set_text(f"PEQUOD | Model day {day:.2f}")
                     for image, field in zip(images, fields.reshape(6, ni, nj), strict=True):
-                        image.set_data(field)
+                        image.set_data(np.ma.array(field, mask=land))
                     writer.grab_frame()
             for output in (png, mp4):
                 output.replace(run_dir / output.name)
@@ -220,7 +237,7 @@ def make_outputs(run_dir, snapshots, fps):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "run_dir", type=Path, help="Path to a run-serial.XXXXXX or run-parallel.XXXXXX folder"
+        "run_dir", type=Path, help="Path to a rectangular or cape qg3 run folder"
     )
     parser.add_argument("--fps", type=int, default=20, help="Frames per second (default: 20)")
     args = parser.parse_args()

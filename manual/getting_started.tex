@@ -113,6 +113,26 @@ recompiled after any modification to these source files with:
 make qg3
 \end{lstlisting}
 
+\section{Running the experimental northern cape case}
+
+The separate \verb+qg3_cape+ executable runs a three-layer basin with a
+rectangular cape attached to the northern wall. From the repository root,
+build it and run the default namelist with:
+\begin{lstlisting}[language = bash, frame = single]
+make -j4 cape
+make run-cape CAPE_RANKS=4 CAPE_RUN_DIR=run-cape-01
+python3 plots/movies.py run-cape-01 --fps 3
+\end{lstlisting}
+The default wind drives a single gyre between the cape and the east wall,
+over the north--south span of the cape.
+For a custom experiment, copy \verb+examples/cape.nml+, edit the cape size,
+attachment, wind profile, viscosity, slip length or snapshot interval, and
+pass the new file with \verb+CAPE_CONFIG=path/to/cape.nml+. Use a fresh run
+directory. Set \verb+advection = 'cabaret'+ in the copy to use experimental
+CABARET on both full and cut cells. The experiment writes standard qg3 primary snapshots for plotting
+and includes a separate geometry file for masking the land. See
+\verb+examples/cape.md+ for parameter units and the scope of the prototype.
+
 %\bibliography{bibliography}
 %\bibliographystyle{plainnat}
 

@@ -1,6 +1,7 @@
 program test_irregular_forcing
   use qg_irregular_parallel, only: distributed_geometry, load_distributed_geometry
-  use qg_irregular_forcing, only: wind_curl_torque, bottom_drag
+  use qg_geometry, only: write_rectangular_cape
+  use qg_irregular_forcing, only: wind_curl_torque, cape_wind_curl_torque, bottom_drag
   use qg_irregular_transport, only: source_momentum_budget
   use qg_parallel, only: parallel_init, parallel_finalise, pabort
   use qg_parameters, only: real_8, pi
@@ -8,6 +9,7 @@ program test_irregular_forcing
   include 'mpif.h'
 
   integer, parameter :: n=33,layers=2
+  integer, parameter :: cape_left=5,cape_width=8,cape_height=18
   real(real_8), parameter :: strength=0.7D0,asym=0.8D0,drag=0.125D0
   real(real_8), parameter :: rays(2,0:7) = reshape([1,0,1,1,0,1,-1,1,-1,0,-1,-1,0,-1,1,-1],[2,8])*0.5D0
   real(real_8), parameter :: gauss(6) = [0.03376524289842399D0,0.1693953067668677D0,0.3806904069584016D0, &
@@ -20,15 +22,25 @@ program test_irregular_forcing
   real(real_8) :: first,second,theta,delta,width,amplitude,direct
   integer :: comm,rank,ranks,ierr,grid(2),box(4),row,column,i,j,sector,ii,jj,mask,component,k,next
   character(1024) :: path,error
+  logical :: cape_case
 
   if (command_argument_count() /= 1) then
-    print '(a)', 'Irregular forcing fixture requires a .dat path'
+    print '(a)', 'Irregular forcing fixture requires a .dat path or --cape'
     stop 2
   end if
   call get_command_argument(1,path)
+  cape_case = path=='--cape'
   call parallel_init()
   call mpi_comm_rank(MPI_COMM_WORLD,rank,ierr)
   call mpi_comm_size(MPI_COMM_WORLD,ranks,ierr)
+  if (cape_case) then
+    path = 'cape-wind.dat'
+    if (rank==0) then
+      call write_rectangular_cape(path,n,n,cape_left,cape_width,cape_height,2.5D0,error)
+      call require(len_trim(error)==0,error)
+    end if
+    call mpi_barrier(MPI_COMM_WORLD,ierr)
+  end if
   call mpi_comm_split(MPI_COMM_WORLD,0,ranks-1-rank,comm,ierr)
   grid = 0
   call mpi_dims_create(ranks,2,grid,ierr)
@@ -39,6 +51,12 @@ program test_irregular_forcing
   call require(len_trim(error)==0,error)
   allocate(curl(geom%ni,geom%nj,layers),omega(geom%ni,geom%nj,layers),base(geom%ni,geom%nj))
   allocate(torque(0:ubound(geom%global%loops,1),layers),gamma(0:ubound(geom%global%loops,1),layers))
+  if (cape_case) then
+    call check_cape_wind()
+    call mpi_comm_free(comm,ierr)
+    call parallel_finalise()
+    stop
+  end if
 
   call wind_curl_torque(geom,strength,0.0D0,0.0D0,asym,curl,torque,error)
   call require(len_trim(error)==0,error)
@@ -111,6 +129,49 @@ program test_irregular_forcing
   call parallel_finalise()
 
 contains
+
+  subroutine check_cape_wind()
+    real(real_8), parameter :: west=cape_left+cape_width-1, east=n-1, south=n-1-cape_height, north=n-1
+    real(real_8) :: x,y,xlo,xhi,ylo,yhi,zonal,meridional,expected,local_error,global_error
+    integer :: i,j
+
+    call cape_wind_curl_torque(geom,strength,west,south,curl,torque,error)
+    call require(len_trim(error)==0,error)
+    call require(all(curl(:,:,2)==0.0D0) .and. all(torque(:,2)==0.0D0),'cape wind entered lower layers')
+    local_error = 0.0D0
+    do j = 1,geom%nj
+      x = geom%j0+j-1
+      xlo = max(west,x-0.5D0)
+      xhi = min(east,x+0.5D0)
+      do i = 1,geom%ni
+        y = n-geom%i0-i
+        ylo = max(south,y-0.5D0)
+        yhi = min(north,y+0.5D0)
+        expected = 0.0D0
+        if (xlo<xhi .and. ylo<yhi) then
+          ! The entire patch is water. Integrate the analytic curl on the
+          ! intersection with the full square even at partially wet cells.
+          zonal = (xhi-xlo)/2-(east-west)/(4*pi)* &
+                  (sin(2*pi*(xhi-west)/(east-west))-sin(2*pi*(xlo-west)/(east-west)))
+          meridional = (cos(pi*(ylo-south)/(north-south))-cos(pi*(yhi-south)/(north-south)))/2
+          expected = strength*zonal*meridional
+        else
+          call require(curl(i,j,1)==0.0D0,'cape wind curl leaked outside the patch')
+        end if
+        local_error = max(local_error,abs(curl(i,j,1)-expected))
+      end do
+    end do
+    call mpi_allreduce(local_error,global_error,1,MPI_DOUBLE_PRECISION,MPI_MAX,comm,ierr)
+    call require(global_error<5.0D-14,'cape wind disagrees with exact cell curl integral')
+    call require(abs(torque(0,1)-strength*(east-west)/2)<5.0D-14,'cape wind has incorrect north-wall torque')
+    call source_momentum_budget(geom,curl,torque,residual,error)
+    call require(len_trim(error)==0,error)
+    base = curl(:,:,1)
+    call cape_wind_curl_torque(geom,-strength,west,south,curl,torque,error)
+    call require(len_trim(error)==0,error)
+    call require(all(curl(:,:,1)==-base),'negative stress did not reverse the cape wind curl')
+    if (rank==0) print '(a,2es14.6,a)', 'cape wind errors: ', global_error,maxval(abs(residual)),' PASS'
+  end subroutine check_cape_wind
 
   subroutine require(ok,message)
     logical, intent(in) :: ok

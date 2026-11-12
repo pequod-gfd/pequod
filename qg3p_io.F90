@@ -396,20 +396,26 @@ contains
   end subroutine log_output
   
   ! Open a parallel data header file.
-  subroutine open_parallel_header(decomp, unit, filename, output_index)
+  subroutine open_parallel_header(decomp, unit, filename, output_index, overwrite)
     type(decomposition), intent(in) :: decomp
     integer, intent(in) :: unit
     character(len = *), intent(in) :: filename
     integer, optional, intent(in) :: output_index
+    logical, optional, intent(in) :: overwrite
   
     character(len = filename_len) :: lfilename
+    character(7) :: open_status
     integer :: ierr
   
     lfilename = filename
     if(present(output_index)) lfilename = trim(lfilename) // "." // int2str(output_index)
     lfilename = parallel_filename(lfilename, decomp)
     
-    open(unit, file = trim(lfilename), form = "formatted", status = "replace", iostat = ierr)
+    open_status = 'replace'
+    if (present(overwrite)) then
+      if (.not. overwrite) open_status = 'new'
+    end if
+    open(unit, file = trim(lfilename), form = "formatted", status = open_status, iostat = ierr)
     if(ierr /= 0) then
       labort("Failed to open header file: " // trim(lfilename))
     end if
@@ -417,14 +423,16 @@ contains
   end subroutine open_parallel_header
   
   ! Open a parallel data file.
-  subroutine open_parallel_data(decomp, unit, filename, output_index, append)
+  subroutine open_parallel_data(decomp, unit, filename, output_index, append, overwrite)
     type(decomposition), intent(in) :: decomp
     integer, intent(in) :: unit
     character(len = *), intent(in) :: filename
     integer, optional, intent(in) :: output_index
     logical, optional, intent(in) :: append
+    logical, optional, intent(in) :: overwrite
     
     character(len = filename_len) :: lfilename
+    character(7) :: open_status
     integer :: ierr
     logical :: append_data
     
@@ -438,7 +446,11 @@ contains
       open(unit, file = trim(lfilename), access = "stream", form = "unformatted", status = "old", &
         & position = "append", iostat = ierr)
     else
-      open(unit, file = trim(lfilename), access = "stream", form = "unformatted", status = "replace", iostat = ierr)
+      open_status = 'replace'
+      if (present(overwrite)) then
+        if (.not. overwrite) open_status = 'new'
+      end if
+      open(unit, file = trim(lfilename), access = "stream", form = "unformatted", status = open_status, iostat = ierr)
     end if
     if(ierr /= 0) then
       labort("Failed to open output data file: " // trim(lfilename))
@@ -461,33 +473,37 @@ contains
   end subroutine write_parallel_header
   
   ! Write header information to a snapshot header file.
-  subroutine write_s_header(decomp, output_index, l_scale, t_scale)
+  subroutine write_s_header(decomp, output_index, l_scale, t_scale, single_level, overwrite)
     use qg_parameters, only : unit
   
     type(decomposition), intent(in) :: decomp
     integer, intent(in) :: output_index
     real(kind = real_8), intent(in) :: l_scale
     real(kind = real_8), intent(in) :: t_scale
+    logical, optional, intent(in) :: single_level,overwrite
     
     integer :: layer
+    logical :: one_level
+    character(16) :: dimensions
     
-    call open_parallel_header(decomp, unit, filename = "qg" // int2str(decomp%layers) // "_" // int2str(decomp%g_ii) // "_s", output_index = output_index)
+#ifdef CABARET
+    one_level = .true.
+#else
+    one_level = .false.
+#endif
+    if (present(single_level)) one_level = single_level
+    dimensions = '  ii jj'
+    if (.not. one_level) dimensions = '  ii jj leapfrog'
+    call open_parallel_header(decomp, unit, filename = "qg" // int2str(decomp%layers) // "_" // int2str(decomp%g_ii) // "_s", &
+                              output_index = output_index, overwrite = overwrite)
     call write_parallel_header(decomp, unit, l_scale, t_scale)
     write(unit, "(a)") "model_time_day"
     write(unit, "(a)") "total_time_day"
     do layer = 1, decomp%layers
-#ifdef CABARET
-      write(unit, "(a,i0,a)") "psi", layer, "  ii jj"
-#else
-      write(unit, "(a,i0,a)") "psi", layer, "  ii jj leapfrog"
-#endif
+      write(unit, "(a,i0,a)") "psi", layer, trim(dimensions)
     end do
     do layer = 1, decomp%layers
-#ifdef CABARET
-      write(unit, "(a,i0,a)") "zeta", layer, "  ii jj"
-#else
-      write(unit, "(a,i0,a)") "zeta", layer, "  ii jj leapfrog"
-#endif
+      write(unit, "(a,i0,a)") "zeta", layer, trim(dimensions)
     end do
     close(unit)
     

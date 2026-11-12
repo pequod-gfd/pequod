@@ -7,6 +7,7 @@ module qg_geometry
   implicit none
   private
   public :: irregular_geometry, boundary_loop, read_geometry, solid_node, fluid_node, wall_node
+  public :: write_rectangular_cape
 
   integer, parameter :: wide = selected_int_kind(18)
   integer, parameter :: solid_node = 0, fluid_node = 1, wall_node = 2
@@ -29,6 +30,149 @@ module qg_geometry
   end type irregular_geometry
 
 contains
+
+  ! The cape removes whole primal squares. Its boundary is one fluid-left
+  ! loop. left is a one-based node column, width and depth count grid cells.
+  subroutine write_rectangular_cape(path, ni, nj, left, width, depth, h, error)
+    character(*), intent(in) :: path
+    integer, intent(in) :: ni,nj,left,width,depth
+    real(real_8), intent(in) :: h
+    character(*), intent(out) :: error
+    type(irregular_geometry) :: geom
+    type(sha256) :: hash
+    integer, parameter :: row_offset(4) = [-1,-1,0,0], col_offset(4) = [0,-1,-1,0]
+    integer :: right,tip,corners(2,9),start(2),step(2),length,k,n,i,j,a,b,q,mask,unit,status
+    character(16) :: hex(4)
+    character(512) :: line
+
+    error = ''
+    if (min(ni,nj)<3 .or. int(ni,wide)*nj>huge(ni)/2 .or. .not. ieee_is_finite(h) .or. h<=0.0D0) then
+      error = 'invalid cape embedding dimensions or spacing'
+      return
+    end if
+    if (left<2 .or. left>=nj-1 .or. width<1 .or. width>nj-left-1 .or. depth<1 .or. depth>ni-3) then
+      error = 'cape must lie between the side walls and leave a strict-fluid row south of its tip'
+      return
+    end if
+    right = left+width
+    tip = 1+depth
+    geom%bounds = [0.0D0,(nj-1)*h,0.0D0,(ni-1)*h]
+    geom%spacing = h
+    geom%coordinate_units = 'cm'
+    geom%distance_tolerance = h*1.0D-8
+    geom%max_snap_distance = h
+    geom%max_depth = 1
+    if (.not. all(ieee_is_finite(geom%bounds)) .or. geom%distance_tolerance<=0.0D0) then
+      error = 'cape bounds or geometry tolerance are outside the supported numeric range'
+      return
+    end if
+    allocate(geom%kind(ni,nj),geom%component(ni,nj),geom%wedge(ni,nj),geom%loops(0:0))
+    allocate(geom%loops(0)%ij(2,2*(ni+nj-2+depth)))
+    corners = reshape([1,1, ni,1, ni,nj, 1,nj, 1,right, tip,right, tip,left, 1,left, 1,1],[2,9])
+    n = 0
+    do k = 1,size(corners,2)-1
+      start = corners(:,k)
+      step = corners(:,k+1)-start
+      length = sum(abs(step))
+      step = step/length
+      do q = 0,length-1
+        n = n+1
+        geom%loops(0)%ij(:,n) = start+q*step
+      end do
+    end do
+    do i = 1,ni
+      do j = 1,nj
+        mask = 0
+        do q = 1,4
+          a = i+row_offset(q)
+          b = j+col_offset(q)
+          if (a<1 .or. a>=ni .or. b<1 .or. b>=nj) cycle
+          if (a<=depth .and. b>=left .and. b<right) cycle
+          mask = ibset(ibset(mask,2*q-2),2*q-1)
+        end do
+        geom%wedge(i,j) = mask
+        geom%component(i,j) = -1
+        select case(mask)
+          case(0)
+            geom%kind(i,j) = solid_node
+          case(255)
+            geom%kind(i,j) = fluid_node
+          case default
+            geom%kind(i,j) = wall_node
+            geom%component(i,j) = 0
+        end select
+      end do
+    end do
+    call verify_topology(geom,ni,nj,error)
+    if (len_trim(error)/=0) return
+
+    call records(.false.)
+    geom%digest = hash_hex(hash)
+    open(newunit=unit,file=path,status='new',action='write',iostat=status,iomsg=error)
+    if (status/=0) return
+    call records(.true.)
+    if (status/=0) then
+      close(unit)
+    else
+      close(unit,iostat=status,iomsg=error)
+    end if
+
+  contains
+
+    subroutine records(writing)
+      logical, intent(in) :: writing
+      integer :: row,col,vertex
+
+      call record(signature,writing)
+      write(line,'(a,2(1x,i0))') 'GRID',ni,nj
+      call record(line,writing)
+      if (writing) then
+        write(line,'(a,4(1x,es26.17e3))') 'BOUNDS',geom%bounds
+      else
+        do vertex = 1,4
+          write(hex(vertex),'(z16.16)') transfer(geom%bounds(vertex),0_wide)
+          call lower_hex(hex(vertex))
+        end do
+        write(line,'(a,4(1x,a))') 'BOUNDS',hex
+      end if
+      call record(line,writing)
+      call record('COORD_UNITS cm',writing)
+      call record('INDEX '//index_convention,writing)
+      if (writing) then
+        write(line,'(a,1x,es26.17e3,1x,i0,1x,es26.17e3)') &
+          'SAMPLING',geom%distance_tolerance,geom%max_depth,geom%max_snap_distance
+        call record(line,writing)
+        call record('HASH SHA256 '//geom%digest,writing)
+      end if
+      write(line,'(a,1x,i0)') 'NODES',ni*nj
+      call record(line,writing)
+      do row = 1,ni
+        do col = 1,nj
+          write(line,'(i0,4(1x,i0))') row,col,geom%kind(row,col),geom%component(row,col),geom%wedge(row,col)
+          call record(line,writing)
+        end do
+      end do
+      call record('COMPONENTS 1',writing)
+      write(line,'(a,1x,i0)') '0 OUTER',n
+      call record(line,writing)
+      do vertex = 1,n
+        write(line,'(i0,1x,i0)') geom%loops(0)%ij(:,vertex)
+        call record(line,writing)
+      end do
+      call record('END',writing)
+    end subroutine records
+
+    subroutine record(text,writing)
+      character(*), intent(in) :: text
+      logical, intent(in) :: writing
+
+      if (writing) then
+        if (status==0) write(unit,'(a)',iostat=status,iomsg=error) trim(text)
+      else
+        call hash_line(hash,text)
+      end if
+    end subroutine record
+  end subroutine write_rectangular_cape
 
   ! Return an error to the caller so an MPI root can communicate one decision.
   subroutine read_geometry(path, ni, nj, physical_h, geom, error)

@@ -27,7 +27,8 @@ FLAGS = ("-O0 -g -fcheck=all -fbacktrace -finit-integer=-666 -finit-real=nan "
          "-ffree-line-length-none -Wall -std=gnu -DDDEBUG")
 ARG_FIXTURES = ("test_weak_diffusion", "test_cmm_profile", "test_cmm_dirichlet", "test_irregular_mass", "test_irregular_mpi_geometry",
                 "test_irregular_straight_wall", "test_irregular_operators", "test_irregular_vertex_order",
-                "test_irregular_smooth_corners", "test_irregular_island_constraints", "test_irregular_transport", "test_irregular_forcing")
+                "test_irregular_smooth_corners", "test_irregular_island_constraints", "test_irregular_transport",
+                "test_irregular_forcing", "test_cape_cabaret")
 VERTEX_FIXTURES = {
     "rectangle": "True",
     "diamond": "abs(x-0.5)+abs(y-0.5) < 0.375",
@@ -229,10 +230,31 @@ def check(runner):
             for ranks in (1, 4, 12):
                 runner.mpi(f"{backend}-cut-transport-{fixture}-{ranks}", ranks, binary / "test_irregular_transport",
                            paths[fixture, 33], contains="cut-transport errors, CFL, area, time order:")
+        cape_errors = []
+        for n, variant, ranks in ((33, "affine", 1), (33, "affine", 4),
+                                  (33, "smooth", 4), (65, "smooth", 4), (129, "smooth", 4)):
+            case = f"{backend}-cape-cabaret-{n}-{variant}-{ranks}"
+            folder = work / case
+            folder.mkdir()
+            output = runner.mpi(case, ranks, binary / "test_cape_cabaret", n, variant, cwd=folder,
+                                contains="cape CABARET errors:")
+            if variant == "smooth":
+                fields = output.split("cape CABARET errors:", 1)[1].split()
+                cape_errors.append([float(value) for value in fields[:2]])
+        orders = np.log2(np.asarray(cape_errors[:-1]) / np.asarray(cape_errors[1:]))
+        if not np.all(orders > 1.7):
+            raise CheckFailed(f"{backend} cape CABARET smooth convergence regressed: {orders}")
+        runner.event(f"{backend}-cape-cabaret-order", "PASS", str(orders.tolist()))
         for fixture in ("triangle", "islands", "dry"):
             for ranks in (1, 4, 12):
                 runner.mpi(f"{backend}-forcing-{fixture}-{ranks}", ranks, binary / "test_irregular_forcing",
                            paths[fixture, 33], contains="irregular wind and drag errors:")
+        for ranks in (1, 4):
+            case = f"{backend}-forcing-cape-{ranks}"
+            folder = work / case
+            folder.mkdir()
+            runner.mpi(case, ranks, binary / "test_irregular_forcing", "--cape", cwd=folder,
+                       contains="cape wind errors:")
         for ranks in (1, 4, 12):
             runner.mpi(f"{backend}-smooth-corner-{ranks}", ranks, binary / "test_irregular_smooth_corners",
                        paths["concave", 33], contains="MPI smooth corner max error:")

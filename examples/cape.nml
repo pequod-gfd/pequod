@@ -1,0 +1,17 @@
+&cape
+  advection = "cabaret"
+  nx = 129
+  ny = 129
+  cape_start = 56
+  cape_width = 16
+  cape_height = 32
+  basin_km = 3840.0
+  run_days = 365.0
+  max_dt_seconds = 3600.0
+  snapshot_days = 1.0
+  viscosity_m2_s = 100.0
+  slip_length_km = 120.0
+  beta_gradient = 2.0e-13
+  wind_profile = 'cape_single'
+  wind_stress = 0.8
+/
