@@ -149,11 +149,21 @@ contains
   end subroutine check_decomp
 
   ! Allocate the Helmholtz solver cache.
-  subroutine allocate_helmholtz_cache(hcache, decomp, strat, vbc)
+  subroutine allocate_helmholtz_cache(hcache, decomp, strat, vbc &
+#ifdef PETSC
+                                      , petsc_rtol &
+#endif
+                                      )
     type(helmholtz_cache), intent(out) :: hcache
     type(decomposition), intent(in) :: decomp
     type(stratification), intent(in) :: strat
     type(velocity_boundary_condition), intent(in) :: vbc
+#ifdef PETSC
+    real(real_8), optional, intent(in) :: petsc_rtol
+#ifndef SUPERLU_DIST
+    real(real_8) :: relative_tolerance
+#endif
+#endif
     
     ! Allocate the correction functions
     if(decomp%periodic_j) then
@@ -170,7 +180,10 @@ contains
 #ifdef SUPERLU_DIST
       call allocate(hcache%helm_c, decomp, strat%ss, ksp_type = "preonly", pc_type = "lu")
 #else
-      call allocate(hcache%helm_c, decomp, strat%ss, ksp_type = "cg", pc_type = "sor", atol = 1.0D-16, rtol = 1.0D-7)
+      relative_tolerance = 1.0D-7
+      if (present(petsc_rtol)) relative_tolerance = petsc_rtol
+      call allocate(hcache%helm_c, decomp, strat%ss, ksp_type = "cg", pc_type = "sor", &
+                    atol = 1.0D-16, rtol = relative_tolerance)
 #endif
     else
       call allocate(hcache%helm_c, decomp, strat%ss, ksp_type = "preonly", pc_type = "lu")

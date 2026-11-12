@@ -2,6 +2,7 @@
 *
 !*.*
 !*/
+!/scripts/qg_irregular
 
 # Output files
 *.dat
@@ -48,6 +49,9 @@ share/python-wheels/
 .installed.cfg
 *.egg
 MANIFEST
+
+# Development
+guides/
 
 # PyInstaller
 #  Usually these files are written by a python script from a template

@@ -12,6 +12,35 @@ module lapack_interfaces
   
   public :: eigendecompose, eigendecompose_symmetric, eigenrecompose, &
     & eigenrecompose_symmetric, determinant, invert, inverse, solve
+  public :: dpotrf, dpotrs, dpocon
+
+  interface
+    subroutine dpotrf(uplo, n, a, lda, info)
+      import real_8
+      character, intent(in) :: uplo
+      integer, intent(in) :: n, lda
+      real(real_8), intent(inout) :: a(lda,n)
+      integer, intent(out) :: info
+    end subroutine dpotrf
+
+    subroutine dpotrs(uplo, n, nrhs, a, lda, b, ldb, info)
+      import real_8
+      character, intent(in) :: uplo
+      integer, intent(in) :: n, nrhs, lda, ldb
+      real(real_8), intent(in) :: a(lda,n)
+      real(real_8), intent(inout) :: b(ldb,nrhs)
+      integer, intent(out) :: info
+    end subroutine dpotrs
+
+    subroutine dpocon(uplo, n, a, lda, anorm, rcond, work, iwork, info)
+      import real_8
+      character, intent(in) :: uplo
+      integer, intent(in) :: n, lda
+      real(real_8), intent(in) :: a(lda,n), anorm
+      real(real_8), intent(out) :: rcond, work(3*n)
+      integer, intent(out) :: iwork(n), info
+    end subroutine dpocon
+  end interface
     
   ! API documentation for LAPACK: http://www.netlib.org/lapack/double/
     

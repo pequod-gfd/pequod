@@ -26,6 +26,7 @@ module qg_helmholtz_petsc
   type helmholtz_matrices
     ! Decomposition
     type(decomposition), pointer :: decomp  
+    logical :: quiet = .false.
     ! Helmholtz operator coefficeints
     real(kind = real_8), dimension(:), pointer :: ss
     
@@ -74,7 +75,8 @@ contains
   ! The equations solved are:
   !   \left( \partial_{xx} + \partial_{yy} - ss_i \right) \psi_i = \zeta_i
   ! subject to homogeneous Dirichlet boundary conditions.
-  subroutine allocate_helmholtz_matrices(hmats, decomp, ss, ksp_type, pc_type, hypre_type, atol, rtol, max_its)
+  subroutine allocate_helmholtz_matrices(hmats, decomp, ss, ksp_type, pc_type, hypre_type, atol, rtol, max_its, &
+                                         zero_initial_guess, quiet)
     type(helmholtz_matrices), intent(out) :: hmats
     type(decomposition), target, intent(in) :: decomp    
     real(kind = real_8), dimension(decomp%layers), intent(in) :: ss
@@ -84,6 +86,7 @@ contains
     real(kind = real_8), optional, intent(in) :: atol
     real(kind = real_8), optional, intent(in) :: rtol
     integer, optional, intent(in) :: max_its
+    logical, optional, intent(in) :: zero_initial_guess, quiet
        
     integer :: g_m_ii, i, ierr, j, index, layer, lmax_its, m_ii
     integer, dimension(decomp%ii2 * decomp%jj2) :: gix, lix, nnz
@@ -106,6 +109,7 @@ contains
     end if
     
     hmats%decomp => decomp
+    if (present(quiet)) hmats%quiet = quiet
     
     allocate(hmats%ss(decomp%layers))
     hmats%ss = ss
@@ -157,6 +161,11 @@ contains
       call KSPSetFromOptions(hmats%ksp(layer), ierr);  assert(ierr == 0)
       call KSPCGSetType(hmats%ksp(layer), KSP_CG_SYMMETRIC, ierr);  assert(ierr == 0)
       if(pc_type /= "lu") call KSPSetInitialGuessNonzero(hmats%ksp(layer), PETSC_TRUE, ierr) ;  assert(ierr == 0) 
+      if (present(zero_initial_guess)) then
+        if (zero_initial_guess) then
+          call KSPSetInitialGuessNonzero(hmats%ksp(layer), PETSC_FALSE, ierr); assert(ierr == 0)
+        end if
+      end if
       call KSPSetTolerances(hmats%ksp(layer), lrtol, latol, huge(0.0D0), lmax_its, ierr);  assert(ierr == 0)
     end do
       
@@ -270,13 +279,15 @@ contains
       call VecScale(hmats%rhs, -1.0D0, ierr);  assert(ierr == 0) 
       
       ! Linear solve
-      write(6, "(a)") "Performing linear solve using PETSc"
+      if (.not. hmats%quiet) write(6, "(a)") "Performing linear solve using PETSc"
       call KSPSolve(hmats%ksp(layer), hmats%rhs, hmats%soln, ierr);  assert(ierr == 0)  
       call KSPGetConvergedReason(hmats%ksp(layer), reason, ierr);  assert(ierr == 0)
       call KSPGetIterationNumber(hmats%ksp(layer), its, ierr);  assert(ierr == 0)
-      write(6, "(a,"//real_8_chr//")") "For ss = ", hmats%ss(layer)
-      write(6, "(a,i0)") "Convergence reason: ", reason%v
-      write(6, "(a,i0)") "Iterations: ", its
+      if (.not. hmats%quiet .or. reason%v <= 0) then
+        write(6, "(a,"//real_8_chr//")") "For ss = ", hmats%ss(layer)
+        write(6, "(a,i0)") "Convergence reason: ", reason%v
+        write(6, "(a,i0)") "Iterations: ", its
+      end if
       if(reason%v <= 0) then
         labort("Convergence failure")
       end if

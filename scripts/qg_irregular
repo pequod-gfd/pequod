@@ -1,0 +1,635 @@
+#!/usr/bin/env python3
+"""Generate or validate a PEQUOD version-1 closed-domain geometry."""
+
+import argparse
+import ast
+from collections import deque
+from dataclasses import dataclass
+import hashlib
+import json
+import math
+import operator
+import os
+from pathlib import Path
+import re
+import struct
+import tempfile
+
+import numpy as np
+
+
+HEADER = "PEQUOD_IRREGULAR 1"
+INDEX = "GLOBAL_1_BASED_I_SOUTH_J_EAST"
+SOLID, FLUID, WALL = range(3)
+# E, NE, N, NW, W, SW, S, SE in physical coordinates, expressed as (di,dj).
+RAYS = ((0, 1), (-1, 1), (-1, 0), (-1, -1), (0, -1), (1, -1), (1, 0), (1, 1))
+CARDINAL = RAYS[::2]
+
+
+class GeometryError(ValueError):
+    pass
+
+
+@dataclass(frozen=True)
+class Grid:
+    ni: int
+    nj: int
+    bounds: tuple
+    units: str
+
+    def __post_init__(self):
+        if min(self.ni, self.nj) < 3:
+            raise GeometryError("the embedding requires at least three nodes per axis")
+        if len(self.bounds) != 4 or not all(map(math.isfinite, self.bounds)):
+            raise GeometryError("bounds must contain four finite numbers")
+        xmin, xmax, ymin, ymax = self.bounds
+        dy = (ymax - ymin) / (self.ni - 1)
+        if not math.isfinite(self.h) or self.h <= 0 or dy <= 0:
+            raise GeometryError("coordinate intervals must be positive and finite")
+        if not math.isclose(self.h, dy, rel_tol=1e-12):
+            raise GeometryError("version 1 requires equal coordinate spacing in x and y")
+        if self.units not in ("normalized", "cm"):
+            raise GeometryError("coordinate units must be normalized or cm")
+
+    @property
+    def h(self):
+        return (self.bounds[1] - self.bounds[0]) / (self.nj - 1)
+
+    def coordinates(self, j0, i0):
+        xmin, xmax, ymin, ymax = self.bounds
+        # Use the exact supplied bounds at the endpoints, including with translated origins.
+        x = np.where(j0 == self.nj - 1, xmax, xmin + j0 * self.h)
+        y = np.where(i0 == self.ni - 1, ymin, ymax - i0 * self.h)
+        return x, y
+
+
+def signed_area2(loop):
+    """Twice signed physical area in grid units, with i south and j east."""
+    return sum(i * next_j - j * next_i
+               for (i, j), (next_i, next_j) in zip(loop, loop[1:] + loop[:1]))
+
+
+def ordered_loop(loop):
+    start = loop.index(min(loop))
+    return loop[start:] + loop[:start]
+
+
+def row_crossings(loop):
+    # Each nonhorizontal unit edge contributes only on its lower-index row
+    # under the half-open parity convention. Intersections here are integers.
+    for (i, j), (ni, nj) in zip(loop, loop[1:] + loop[:1]):
+        if i != ni:
+            yield min((i, j), (ni, nj))
+
+
+def contains(loop, node):
+    i, j = node
+    return sum(ii == i and jj > j for ii, jj in row_crossings(loop)) % 2 == 1
+
+
+def sector_mask(previous, node, following):
+    """Fluid-left orientation selects CCW sectors from the outgoing ray."""
+    outgoing = RAYS.index(tuple(b - a for a, b in zip(node, following)))
+    backward = RAYS.index(tuple(b - a for a, b in zip(node, previous)))
+    count = (backward - outgoing) % 8
+    if count == 0:
+        raise GeometryError(f"backtracking at boundary node {node}")
+    return sum(1 << ((outgoing + k) % 8) for k in range(count))
+
+
+@dataclass
+class Geometry:
+    grid: Grid
+    loops: tuple
+    nodes: np.ndarray
+
+    @classmethod
+    def from_loops(cls, grid, loops):
+        if not loops:
+            raise GeometryError("missing outer coastline")
+        loops = [tuple(loop) for loop in loops]
+        wall = {}
+        diagonal_cells = {}
+        for component, loop in enumerate(loops):
+            if len(loop) < 3:
+                raise GeometryError(f"component {component} collapsed to fewer than three nodes")
+            for node, nxt in zip(loop, loop[1:] + loop[:1]):
+                i, j = node
+                if not (1 <= i <= grid.ni and 1 <= j <= grid.nj):
+                    raise GeometryError(f"boundary node {node} is outside the embedding")
+                if node in wall:
+                    raise GeometryError(f"self-touching or shared boundary node {node}")
+                wall[node] = component
+                di, dj = nxt[0] - i, nxt[1] - j
+                if (di, dj) not in RAYS:
+                    raise GeometryError(f"nonadjacent boundary step {node} -> {nxt}")
+                if di and dj:
+                    cell = min(i, nxt[0]), min(j, nxt[1])
+                    if cell in diagonal_cells:
+                        raise GeometryError(f"crossing diagonals in primal cell {cell}")
+                    diagonal_cells[cell] = node
+            area2 = signed_area2(loop)
+            if area2 == 0:
+                raise GeometryError(f"component {component} has zero area")
+            if (area2 > 0) != (component == 0):
+                loops[component] = loop[::-1]
+
+        outer, *islands = map(ordered_loop, loops)
+        for island in islands:
+            if not contains(outer, island[0]):
+                raise GeometryError(f"island at {island[0]} is outside the outer coastline")
+            if any(other != island and contains(other, island[0]) for other in islands):
+                raise GeometryError(f"nested island at {island[0]} would enclose a separate basin")
+        loops = (outer, *sorted(islands))
+
+        nodes = np.zeros((grid.ni, grid.nj, 3), dtype=np.int32)
+        nodes[:, :, 1] = -1
+        # Exact scanline classification of all non-wall nodes.
+        crossings = [[] for _ in range(grid.ni)]
+        for component, loop in enumerate(loops):
+            for i, j in row_crossings(loop):
+                crossings[i - 1].append(j)
+            for k, (i, j) in enumerate(loop):
+                nodes[i - 1, j - 1] = WALL, component, sector_mask(loop[k - 1], (i, j), loop[(k + 1) % len(loop)])
+        for i, crossings_i in enumerate(crossings):
+            crossings_i.sort()
+            if len(crossings_i) % 2:
+                raise GeometryError(f"unpaired polygon crossing on row {i + 1}")
+            for left, right in zip(crossings_i[::2], crossings_i[1::2]):
+                interior = nodes[i, left:right - 1]
+                interior[interior[:, 0] == SOLID] = FLUID, -1, 255
+
+        geometry = cls(grid, loops, nodes)
+        geometry.check_fluid_graph()
+        area8 = sum(int(mask).bit_count() for mask in nodes[:, :, 2].flat)
+        if area8 != 4 * sum(map(signed_area2, loops)):
+            raise GeometryError("cut-cell eighths do not sum to the polygon area")
+        return geometry
+
+    def check_fluid_graph(self):
+        kinds = self.nodes[:, :, 0]
+        interior = set(map(tuple, np.argwhere(kinds == FLUID)))
+        if not interior:
+            raise GeometryError("the snapped domain has no strict-fluid nodes")
+        queue = deque([min(interior)])
+        interior.remove(queue[0])
+        while queue:
+            i, j = queue.popleft()
+            for di, dj in CARDINAL:
+                ii, jj = i + di, j + dj
+                if not (0 <= ii < self.grid.ni and 0 <= jj < self.grid.nj) or kinds[ii, jj] == SOLID:
+                    raise GeometryError(f"five-point stencil leaks from fluid node {(i + 1, j + 1)} "
+                                        f"to {(ii + 1, jj + 1)}")
+                if (ii, jj) in interior:
+                    interior.remove((ii, jj))
+                    queue.append((ii, jj))
+        if interior:
+            i, j = min(interior)
+            raise GeometryError(f"disconnected strict-fluid graph near node {(i + 1, j + 1)}")
+        for i, j in np.argwhere(kinds == WALL):
+            for di, dj in CARDINAL:
+                ii, jj = i + di, j + dj
+                if (0 <= ii < self.grid.ni and 0 <= jj < self.grid.nj and kinds[ii, jj] == WALL
+                        and self.nodes[i, j, 1] != self.nodes[ii, jj, 1]):
+                    raise GeometryError(f"unresolved one-spacing gap between components at {(i + 1, j + 1)}")
+
+    def records(self):
+        yield f"NODES {self.grid.ni * self.grid.nj}"
+        for i, row in enumerate(self.nodes, 1):
+            for j, (kind, component, mask) in enumerate(row, 1):
+                yield f"{i} {j} {kind} {component} {mask}"
+        yield f"COMPONENTS {len(self.loops)}"
+        for component, loop in enumerate(self.loops):
+            role = "OUTER" if component == 0 else "ISLAND"
+            yield f"{component} {role} {len(loop)}"
+            for i, j in loop:
+                yield f"{i} {j}"
+        yield "END"
+
+    def headers(self, bounds):
+        return [HEADER, f"GRID {self.grid.ni} {self.grid.nj}", "BOUNDS " + " ".join(bounds),
+                "COORD_UNITS " + self.grid.units, "INDEX " + INDEX]
+
+    def digest(self):
+        # Hash binary64 coordinate values as big-endian hex, independent of
+        # language-specific decimal formatting and input whitespace.
+        bounds = [struct.pack(">d", bound).hex() for bound in self.grid.bounds]
+        digest = hashlib.sha256()
+        for line in self.headers(bounds):
+            digest.update((line + "\n").encode("ascii"))
+        for line in self.records():
+            digest.update((line + "\n").encode("ascii"))
+        return digest.hexdigest()
+
+    def write(self, path, sampling):
+        bounds = [format(bound, ".17g") for bound in self.grid.bounds]
+        with path.open("w", encoding="ascii", newline="\n") as stream:
+            for line in self.headers(bounds):
+                stream.write(line + "\n")
+            tol, depth, max_snap = sampling
+            stream.write(f"SAMPLING {tol:.17g} {depth} {max_snap:.17g}\n")
+            stream.write("HASH SHA256 " + self.digest() + "\n")
+            for line in self.records():
+                stream.write(line + "\n")
+
+    @classmethod
+    def read(cls, path):
+        with path.open(encoding="ascii") as stream:
+            line_number = 0
+
+            def record(count, *prefix):
+                nonlocal line_number
+                line_number += 1
+                tokens = stream.readline().split()
+                if len(tokens) != count or tokens[:len(prefix)] != list(prefix):
+                    raise GeometryError(f"invalid record at line {line_number} (expected {' '.join(prefix) or count})")
+                return tokens[len(prefix):]
+
+            record(2, *HEADER.split())
+            ni, nj = map(int, record(3, "GRID"))
+            bounds = tuple(map(float, record(5, "BOUNDS")))
+            units, = record(2, "COORD_UNITS")
+            grid = Grid(ni, nj, bounds, units)
+            record(2, "INDEX", INDEX)
+            tol, depth, snap = record(4, "SAMPLING")
+            if not (math.isfinite(float(tol)) and float(tol) > 0
+                    and 1 <= int(depth) <= 10 and math.isfinite(float(snap)) and float(snap) > 0):
+                raise GeometryError("invalid SAMPLING metadata")
+            expected_digest, = record(3, "HASH", "SHA256")
+            if not re.fullmatch(r"[0-9a-f]{64}", expected_digest):
+                raise GeometryError("invalid SHA256 digest")
+            count, = record(2, "NODES")
+            if int(count) != ni * nj:
+                raise GeometryError("incorrect node count")
+            supplied = []
+            for k in range(ni * nj):
+                i, j, kind, component, mask = map(int, record(5))
+                row, column = divmod(k, nj)
+                if (i, j) != (row + 1, column + 1):
+                    raise GeometryError(f"node records out of order at line {line_number}")
+                supplied.append((kind, component, mask))
+            count, = record(2, "COMPONENTS")
+            count = int(count)
+            if not 1 <= count <= ni * nj // 3:
+                raise GeometryError("invalid component count")
+            loops = []
+            for component in range(count):
+                role = "OUTER" if component == 0 else "ISLAND"
+                length, = record(3, str(component), role)
+                length = int(length)
+                if not 3 <= length <= ni * nj:
+                    raise GeometryError("invalid component length")
+                loops.append(tuple(tuple(map(int, record(2))) for _ in range(length)))
+            record(1, "END")
+            if stream.read().strip():
+                raise GeometryError("unexpected data after END")
+        geometry = cls.from_loops(grid, loops)
+        if geometry.loops != tuple(loops):
+            raise GeometryError("component ordering or orientation is noncanonical")
+        if not np.array_equal(geometry.nodes.reshape(-1, 3), supplied):
+            raise GeometryError("node flags disagree with reconstructed polygons")
+        if geometry.digest() != expected_digest:
+            raise GeometryError("geometry SHA256 mismatch")
+        return geometry
+
+
+ARITHMETIC = {ast.Add: operator.add, ast.Sub: operator.sub, ast.Mult: operator.mul,
+              ast.Div: operator.truediv, ast.Pow: operator.pow}
+COMPARISONS = {ast.Lt: operator.lt, ast.LtE: operator.le, ast.Gt: operator.gt, ast.GtE: operator.ge,
+               ast.Eq: operator.eq, ast.NotEq: operator.ne}
+FUNCTIONS = {"abs": np.abs, "sqrt": np.sqrt, "sin": np.sin, "cos": np.cos, "exp": np.exp, "log": np.log}
+
+
+def parse_predicate(source):
+    """Compile only whitelisted expressions into array operations, with no eval."""
+    if len(source) > 4096:
+        raise GeometryError("fluid predicate is too long")
+    source = re.sub(r"\b(AND|OR|NOT)\b", lambda match: match[0].lower(), source).replace("^", "**")
+    tree = ast.parse(source.strip(), mode="eval")
+
+    def numeric(node):
+        if isinstance(node, ast.Name) and node.id in ("x", "y"):
+            return (lambda x, y: x) if node.id == "x" else (lambda x, y: y)
+        if isinstance(node, ast.Constant) and type(node.value) in (int, float, bool):
+            value = float(node.value)
+            if type(node.value) is not bool and math.isfinite(value):
+                return lambda x, y: np.float64(value)
+        if isinstance(node, ast.BinOp) and type(node.op) in ARITHMETIC:
+            op = ARITHMETIC[type(node.op)]
+            left, right = numeric(node.left), numeric(node.right)
+            return lambda x, y: op(left(x, y), right(x, y))
+        if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
+            operand = numeric(node.operand)
+            return operand if isinstance(node.op, ast.UAdd) else lambda x, y: -operand(x, y)
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in FUNCTIONS
+                and len(node.args) == 1 and not node.keywords):
+            fun, arg = FUNCTIONS[node.func.id], numeric(node.args[0])
+            return lambda x, y: fun(arg(x, y))
+        raise GeometryError(f"unsupported numeric predicate term {ast.unparse(node)!r}")
+
+    def boolean(node):
+        if isinstance(node, ast.Compare) and all(type(op) in COMPARISONS for op in node.ops):
+            operands = list(map(numeric, [node.left, *node.comparators]))
+            operators = [COMPARISONS[type(op)] for op in node.ops]
+
+            def compare(x, y):
+                values = [operand(x, y) for operand in operands]
+                if not all(np.isfinite(value).all() for value in values):
+                    raise GeometryError("nonfinite comparison field in fluid predicate")
+                result = True
+                for op, left, right in zip(operators, values, values[1:]):
+                    result = np.logical_and(result, op(left, right))
+                return result
+
+            return compare
+        if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
+            operand = boolean(node.operand)
+            return lambda x, y: np.logical_not(operand(x, y))
+        if isinstance(node, ast.BoolOp):
+            operands = list(map(boolean, node.values))
+            op = np.logical_and if isinstance(node.op, ast.And) else np.logical_or
+
+            def combine(x, y):
+                result = operands[0](x, y)
+                for operand in operands[1:]:
+                    result = op(result, operand(x, y))
+                return result
+
+            return combine
+        if isinstance(node, ast.Constant) and type(node.value) is bool:
+            return lambda x, y: node.value
+        raise GeometryError("the fluid expression must be a Boolean predicate")
+
+    evaluate = boolean(tree.body)
+
+    def predicate(x, y):
+        with np.errstate(divide="raise", invalid="raise", over="raise"):
+            return np.broadcast_to(evaluate(x, y), np.broadcast_shapes(np.shape(x), np.shape(y)))
+
+    return predicate
+
+
+def sampled_loops(grid, predicate, tolerance, depth):
+    """March the predicate on a dyadic subgrid, then bisect its active edges."""
+    import contourpy
+
+    subdivisions = 2**depth
+    width, height = subdivisions * (grid.nj - 1), subdivisions * (grid.ni - 1)
+    if (width + 3) * (height + 3) > 20_000_000:
+        raise GeometryError("sampling exceeds 20 million points; reduce --max-depth or grid size")
+    j = np.arange(-1, width + 2)
+    i = np.arange(-1, height + 2)
+
+    def evaluate(points):
+        x, y = grid.coordinates(points[..., 0] / subdivisions, points[..., 1] / subdivisions)
+        return predicate(x, y)
+
+    samples = np.zeros((height + 3, width + 3), dtype=bool)
+    x, y = grid.coordinates(j[1:-1][None, :] / subdivisions, i[1:-1][:, None] / subdivisions)
+    samples[1:-1, 1:-1] = predicate(x, y)
+    nw, ne, sw, se = samples[:-1, :-1], samples[:-1, 1:], samples[1:, :-1], samples[1:, 1:]
+    saddles = np.argwhere((nw == se) & (ne == sw) & (nw != ne))
+    if len(saddles):
+        row, column = (saddles[0] - 1) // subdivisions + 1
+        raise GeometryError(f"unresolved saddle in primal cell {(row, column)}; increase sampling or refine mesh")
+
+    # Increasing i runs southward here. contourpy orients the high side left
+    # in its own axes, so a physical outer loop has negative signed j/i area.
+    contours = contourpy.contour_generator(x=j, y=i, z=samples, name="serial").lines(0.5)
+    analog, digital = [], []
+    primal_crossings = set()
+    for line in contours:
+        line = line[::-1]
+        if not np.array_equal(line[0], line[-1]):
+            raise GeometryError("unclosed sampled contour at the embedding boundary")
+        low, high = np.floor(line), np.ceil(line)
+        # Predicate evaluated on the fine edge bracket, never outside the box.
+        extent = np.array([width, height])
+        interior = np.all((low >= 0) & (high <= extent), axis=1)
+        a, b = low[interior], high[interior]
+        side = evaluate(a)
+        rounds = max(0, math.ceil(math.log2(grid.h / subdivisions / tolerance)))
+        if rounds > 45:
+            raise GeometryError("distance tolerance is below the useful coordinate precision")
+        for _ in range(rounds):
+            midpoint = (a + b) / 2
+            same_side = evaluate(midpoint) == side
+            a[same_side] = midpoint[same_side]
+            b[~same_side] = midpoint[~same_side]
+        refined = np.clip(line, 0, extent)
+        refined[interior] = (a + b) / 2
+        # Primal-edge transitions and vertices on clipped embedding edges.
+        # The line's fixed fine coordinate is exact, even after bisection.
+        is_primal = np.any(line % subdivisions == 0, axis=1)
+        crossings = refined[:-1][is_primal[:-1]] / subdivisions
+        if len(crossings) == 0:
+            j0, i0 = refined[0] / subdivisions
+            raise GeometryError(f"subgrid closed contour in primal cell {(int(i0)+1, int(j0)+1)}")
+        near_node = np.all(abs(crossings - np.rint(crossings)) <= tolerance / grid.h, axis=1)
+        for column, row in crossings[~near_node]:
+            axis = "row" if row == round(row) else "column"
+            edge = axis, int(row) + 1, int(column) + 1
+            if edge in primal_crossings:
+                raise GeometryError(f"multiple sampled crossings of primal edge {edge}; refine the mesh")
+            primal_crossings.add(edge)
+        halfway = np.floor(crossings) + 0.5
+        crossings = np.where(abs(crossings - halfway) <= tolerance / (2 * grid.h), halfway, crossings)
+        rounded = np.ceil(crossings - 0.5).astype(int) + 1
+        nodes = []
+        for column, row in rounded:
+            node = int(row), int(column)
+            if not nodes or node != nodes[-1]:
+                nodes.append(node)
+        if len(nodes) > 1 and nodes[0] == nodes[-1]:
+            nodes.pop()
+
+        refined /= subdivisions
+        # Drop any repeated analog vertices introduced by clipping at box corners.
+        refined = refined[np.r_[True, np.any(np.diff(refined, axis=0) != 0, axis=1)]]
+        if not np.array_equal(refined[0], refined[-1]):
+            refined = np.vstack([refined, refined[0]])
+        area = -np.sum(refined[:-1, 0] * refined[1:, 1] - refined[1:, 0] * refined[:-1, 1]) / 2
+        if area == 0 or len(nodes) < 3:
+            raise GeometryError(f"contour near {nodes[0]} collapses under snapping; refine the mesh")
+        analog.append((float(area), refined))
+        digital.append((area, tuple(nodes)))
+    if sum(area > 0 for area, _ in digital) != 1:
+        raise GeometryError("the sampled predicate must enclose one connected fluid basin")
+    digital.sort(key=lambda item: item[0] < 0)
+    return [loop for _, loop in digital], analog
+
+
+def distances_to_path(points, path):
+    """Maximum of the sampled point-to-polyline distances in grid units."""
+    starts = path[:-1]
+    steps = np.diff(path, axis=0)
+    norm2 = np.sum(steps**2, axis=1)
+    if np.any(norm2 == 0):
+        raise GeometryError("coincident points in sampled contour")
+    worst = 0.0
+    for chunk in np.array_split(points, (len(points) + 63) // 64):
+        delta = chunk[:, None, :] - starts
+        projection = np.clip(np.sum(delta * steps, axis=2) / norm2, 0.0, 1.0)
+        distance2 = np.sum((delta - projection[..., None] * steps)**2, axis=2)
+        worst = max(worst, float(np.max(np.min(distance2, axis=1))))
+    return math.sqrt(worst)
+
+
+def geometry_report(geometry, analog, sampling, source):
+    h = geometry.grid.h
+    snapped_area = sum(map(signed_area2, geometry.loops)) / 2 * h**2
+    report = {
+        "geometry_sha256": geometry.digest(),
+        "fluid_predicate": source,
+        "sampled_component_count": len(analog),
+        "adopted_component_count": len(geometry.loops),
+        "adopted_area": snapped_area,
+        "distance_tolerance": sampling[0],
+        "max_depth": sampling[1],
+        "max_snap_distance": sampling[2],
+    }
+    if analog:
+        analog_area = sum(area for area, _ in analog) * h**2
+        # Associate each sampled loop with its own digital loop using its
+        # snapped orientation and canonical node ordering, independent of plotting.
+        report["sampled_analytic_area"] = analog_area
+        report["area_difference"] = snapped_area - analog_area
+        worst = 0.0
+        for loop, (_, path) in zip(geometry.loops, analog):
+            adopted = np.array([(j - 1, i - 1) for i, j in (*loop, loop[0])], dtype=float)
+            samples = adopted[:-1, None] + np.arange(8)[None, :, None] / 8 * np.diff(adopted, axis=0)[:, None]
+            worst = max(worst, distances_to_path(path, adopted), distances_to_path(samples.reshape(-1, 2), path))
+        report["sampled_hausdorff_distance"] = worst * h
+        if worst * h > sampling[2]:
+            raise GeometryError(f"sampled coast displacement {worst*h:.6g} exceeds limit {sampling[2]:.6g}")
+    return report
+
+
+def plot_domain(path, geometry, analog, report):
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.path import Path as PlotPath
+    from matplotlib.patches import PathPatch
+
+    grid = geometry.grid
+    xmin, xmax, ymin, ymax = grid.bounds
+    box = np.array([(xmin, ymin), (xmax, ymin), (xmax, ymax), (xmin, ymax), (xmin, ymin)])
+
+    def xy(loop):
+        i, j = np.array([*loop, loop[0]]).T - 1
+        return np.column_stack(grid.coordinates(j, i))
+
+    def polygon(points):
+        return PlotPath(points, [PlotPath.MOVETO] + [PlotPath.LINETO] * (len(points) - 2) + [PlotPath.CLOSEPOLY])
+
+    fig, ax = plt.subplots(figsize=(7, 6), layout="constrained")
+    ax.set_facecolor("#f5fafc")
+    # Nonzero winding fills box minus fluid, including the island holes.
+    walls = [xy(loop) for loop in geometry.loops]
+    land = PlotPath.make_compound_path(polygon(box), *(polygon(loop[::-1]) for loop in walls))
+    ax.add_patch(PathPatch(land, facecolor="#e0e0e0", edgecolor="#8a8a8a", hatch="///", linewidth=0))
+    for index, (_, line) in enumerate(analog):
+        ax.plot(*grid.coordinates(line[:, 0], line[:, 1]), color="#5e7386", ls="--", lw=1,
+                alpha=0.7, label="Sampled predicate" if index == 0 else None)
+    for index, wall in enumerate(walls):
+        ax.plot(*wall.T, color="#163d55", lw=1.15, marker=".", ms=2.5,
+                label="Boundary nodes and edges" if index == 0 else None)
+        offset = (3, -12) if index == 0 else (3, 4)
+        ax.annotate(str(index), wall[0], xytext=offset, textcoords="offset points", color="#163d55",
+                    bbox={"facecolor": "white", "edgecolor": "none", "pad": 0.8})
+    ax.set(xlim=(xmin, xmax), ylim=(ymin, ymax), aspect="equal",
+           xlabel=f"x east ({grid.units})", ylabel=f"y north ({grid.units})")
+    title = f"{grid.ni} × {grid.nj} nodes · {len(walls) - 1} islands"
+    if analog:
+        title += (f"\nSampled displacement {report['sampled_hausdorff_distance']:.3g} · "
+                  f"depth {report['max_depth']} · tolerance {report['distance_tolerance']:.2g}")
+    ax.set_title(title, fontsize=11)
+    ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.12), ncols=2, frameon=False, fontsize=8)
+    fig.savefig(path, dpi=160, format=path.suffix[1:].lower())
+    plt.close(fig)
+
+
+def write_outputs(geometry, analog, sampling, report, output, plot):
+    report_path = output.with_suffix(".json")
+    destinations = (output, plot, report_path)
+    if len({path.resolve() for path in destinations}) != len(destinations):
+        raise GeometryError("geometry, plot and JSON report must have distinct output paths")
+    temporary = []
+    try:
+        for path in destinations:
+            with tempfile.NamedTemporaryFile(dir=path.parent, prefix=f".{path.stem}-",
+                                             suffix=path.suffix, delete=False) as stream:
+                temporary.append(Path(stream.name))
+        data, figure, metadata = temporary
+        geometry.write(data, sampling)
+        Geometry.read(data)
+        plot_domain(figure, geometry, analog, report)
+        metadata.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        # Publish the validated .dat after all products have been generated.
+        for src, target in reversed(list(zip(temporary, destinations))):
+            os.replace(src, target)
+    finally:
+        for path in temporary:
+            path.unlink(missing_ok=True)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("g_ii", type=int, nargs="?")
+    parser.add_argument("g_jj", type=int, nargs="?")
+    parser.add_argument("--bounds", type=float, nargs=4, metavar=("XMIN", "XMAX", "YMIN", "YMAX"))
+    parser.add_argument("--coordinate-units", choices=("normalized", "cm"))
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--fluid", help="Boolean predicate in x and y; ^ is an exponent alias")
+    source.add_argument("--loops", type=Path, help="JSON array of loops in global [i,j] indices, outer first")
+    source.add_argument("--check", type=Path, help="validate an existing .dat without generating output")
+    parser.add_argument("--output", type=Path)
+    parser.add_argument("--plot", type=Path)
+    parser.add_argument("--max-depth", type=int, default=4, help="dyadic subdivision depth (default: 4)")
+    parser.add_argument("--distance-tol", type=float, help="edge crossing bisection tolerance (default: 1e-8 h)")
+    parser.add_argument("--max-snap-distance", type=float, help="sampled displacement limit (default: 0.8 h)")
+    args = parser.parse_args()
+    try:
+        if args.check:
+            geometry = Geometry.read(args.check)
+            print(f"Valid geometry {geometry.digest()}")
+            return
+        if None in (args.g_ii, args.g_jj, args.bounds, args.coordinate_units, args.output, args.plot):
+            parser.error("generation requires dimensions, --bounds, --coordinate-units, --output and --plot")
+        if args.output.suffix != ".dat":
+            parser.error("--output must use the .dat extension")
+        grid = Grid(args.g_ii, args.g_jj, tuple(args.bounds), args.coordinate_units)
+        tol = grid.h * 1e-8 if args.distance_tol is None else args.distance_tol
+        max_snap = grid.h * 0.8 if args.max_snap_distance is None else args.max_snap_distance
+        if not (math.isfinite(tol) and 0 < tol < grid.h and 1 <= args.max_depth <= 10
+                and math.isfinite(max_snap) and max_snap > 0):
+            raise GeometryError("require 0 < distance tolerance < h, 1 <= max depth <= 10 and a positive finite snap limit")
+        sampling = tol, args.max_depth, max_snap
+        analog = []
+        if args.loops:
+            loops = json.loads(args.loops.read_text(encoding="utf-8"))
+            if not isinstance(loops, list) or not all(isinstance(loop, list) and all(
+                    isinstance(node, list) and len(node) == 2 and all(type(index) is int for index in node)
+                    for node in loop) for loop in loops):
+                raise GeometryError("loop fixture must be an array of loops containing integer [i,j] pairs")
+            loops = [list(map(tuple, loop)) for loop in loops]
+        else:
+            predicate = parse_predicate(args.fluid)
+            loops, analog = sampled_loops(grid, predicate, tol, args.max_depth)
+        geometry = Geometry.from_loops(grid, loops)
+        if analog:
+            by_loop = {}
+            for loop, (area, path) in zip(loops, sorted(analog, key=lambda item: item[0] < 0)):
+                orientation_matches = (signed_area2(loop) > 0) == (area > 0)
+                by_loop[ordered_loop(loop if orientation_matches else loop[::-1])] = area, path
+            analog = [by_loop[loop] for loop in geometry.loops]
+        report = geometry_report(geometry, analog, sampling, args.fluid)
+        write_outputs(geometry, analog, sampling, report, args.output, args.plot)
+        print(f"Wrote {args.output}, {args.plot} and {args.output.with_suffix('.json')}")
+    except (ValueError, OSError, SyntaxError, ArithmeticError, RecursionError) as error:
+        parser.exit(1, f"qg_irregular: {error}\n")
+
+
+if __name__ == "__main__":
+    main()
