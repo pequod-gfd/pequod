@@ -21,18 +21,19 @@ program test_irregular_mass
   type(velocity_boundary_condition) :: bc
   type(helmholtz_cache) :: legacy
   type(parallel_data) :: old_psi, old_zeta
-  type(basin_mass_cache) :: cache
+  type(basin_mass_cache) :: cache, inactive_cache
   real(real_8) :: exact(n,n,nl), target(nl), sums(nl), weights(n,n), modal(nl), area, potential, kinetic(nl)
   real(real_8) :: local_error, error_max, gauge_error, x,y, expected_area, expected_potential, layer_values(nl), recovered(nl)
+  real(real_8) :: invalid_target(nl-1)
   real(real_8), allocatable :: pv(:,:,:), psi(:,:,:), halo(:,:,:), omega(:,:,:), wall_values(:,:)
   integer :: i,j,gi,gj,k,ranks,grid(2),ierr,kind
   integer, allocatable :: iis(:),jjs(:)
   character(1024) :: path, error
   character(30) :: fixture
 
-  if (command_argument_count() == 0) then
+  if (command_argument_count() /= 2) then
     print '(a)', 'Mass fixture requires a .dat path and case name'
-    stop
+    stop 2
   end if
   call get_command_argument(1,path)
   call get_command_argument(2,fixture)
@@ -84,7 +85,12 @@ program test_irregular_mass
         pv(i,j,:) = layer_values
       end do
     end do
-    call invert_basin_mass(cache,pv,target(2:),psi,recovered,error)
+    if (fixture == 'triangle') then
+      call invert_basin_mass(inactive_cache,g%comm,pv,target(2:),psi,recovered,error)
+      call require(error == 'basin mass cache is not initialized','all-rank inactive cache was not rejected')
+      if (ranks > 1) call check_invalid_inputs()
+    end if
+    call invert_basin_mass(cache,g%comm,pv,target(2:),psi,recovered,error)
     call require(len_trim(error) == 0,error)
     call z_to_modes(s,psi,omega)
     call fluid_integrals(g,omega,sums)
@@ -133,7 +139,7 @@ program test_irregular_mass
 #endif
                     )
       call pv_inversion(s,bc,old_zeta,legacy,old_psi)
-      call invert_basin_mass(cache,pv,[0.0D0,0.0D0],psi,recovered,error)
+      call invert_basin_mass(cache,g%comm,pv,[0.0D0,0.0D0],psi,recovered,error)
       call require(len_trim(error) == 0,error)
       call z_to_modes(s,psi,omega)
       gauge_error = mean(d,omega(:,:,1))
@@ -170,6 +176,33 @@ program test_irregular_mass
   call parallel_finalise()
 
 contains
+  subroutine check_invalid_inputs()
+    integer :: n_targets
+
+    if (g%rank == 1) then
+      call invert_basin_mass(inactive_cache,g%comm,pv,target(2:),psi,recovered,error)
+    else
+      call invert_basin_mass(cache,g%comm,pv,target(2:),psi,recovered,error)
+    end if
+    call require(error == 'basin mass cache is not initialized','one-rank inactive cache was not rejected collectively')
+
+    n_targets = nl-1
+    if (g%rank == 1) n_targets = nl-2
+    call invert_basin_mass(cache,g%comm,pv,target(2:1+n_targets),psi,recovered,error)
+    call require(error == 'incompatible simply connected mass inversion dimensions','one-rank invalid shape was not rejected')
+
+    invalid_target = target(2:)
+    if (g%rank == 1) invalid_target(1) = ieee_value(0.0D0,ieee_quiet_nan)
+    call invert_basin_mass(cache,g%comm,pv,invalid_target,psi,recovered,error)
+    call require(error == 'baroclinic mass targets must be finite','one-rank NaN target was not rejected collectively')
+
+    invalid_target = target(2:)
+    if (g%rank == 1) invalid_target(1) = invalid_target(1) + 0.125D0
+    call invert_basin_mass(cache,g%comm,pv,invalid_target,psi,recovered,error)
+    call require(error == 'baroclinic mass targets differ across ranks','inconsistent targets were not rejected collectively')
+    if (g%rank == 0) print '(a)', 'Collective invalid inputs (inactive cache, shape, NaN, disagreement) PASS'
+  end subroutine check_invalid_inputs
+
   real(real_8) function triangle_weight(ix,iy)
     integer, intent(in) :: ix,iy
     integer :: q

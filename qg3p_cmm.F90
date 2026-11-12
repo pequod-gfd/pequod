@@ -1,14 +1,22 @@
 #include "config.h"
+#ifdef PETSC
+#include "petscconf.h"
+#endif
 
 ! Collocated Dirichlet capacitance correction for the native L = Delta - ss.
 module qg_cmm
   use, intrinsic :: ieee_arithmetic, only: ieee_is_finite
   use lapack_interfaces, only: dpotrf, dpotrs, dpocon
   use qg_geometry, only: wall_node, fluid_node
-  use qg_irregular_parallel, only: distributed_geometry
+  use qg_irregular_parallel, only: distributed_geometry, broadcast_error
   use qg_laplace_bc, only: add_laplace_bc_rhs, apply_dirichlet_bc
   use qg_parallel, only: decomposition, request_cache, parallel_data, allocate, deallocate, update, flush
-  use qg_parameters, only: real_8
+  use qg_parameters, only: real_8, pi
+  use qg_cmm_dense, only: has_scalapack
+#if defined(PETSC) && defined(PETSC_HAVE_SCALAPACK)
+  use qg_cmm_dense, only: dense_factor, create_factor, set_factor_column, assemble_factor, factor_dense, &
+                          solve_dense, destroy_factor
+#endif
 #ifdef PETSC
   use qg_helmholtz_petsc, only: rectangle_cache => helmholtz_matrices, allocate, deallocate, solve_helmholtz
 #else
@@ -24,7 +32,9 @@ module qg_cmm
 
   type cmm_statistics
     integer :: constraints = 0, factors = 0, background_batches = 0
+    logical :: distributed_factor = .false.
     integer(wide) :: factor_bytes = 0, local_green_bytes = 0
+    integer(wide) :: explicit_array_bytes = 0, dense_setup_peak_bytes = 0
     real(real_8) :: max_rectangle_backward_error = 0.0D0
     real(real_8) :: relative_asymmetry = 0.0D0, min_rcond = 1.0D0
   end type cmm_statistics
@@ -37,6 +47,9 @@ module qg_cmm
     type(parallel_data) :: halo
     type(request_cache), pointer :: requests => null()
     type(cmm_statistics) :: stats
+#if defined(PETSC) && defined(PETSC_HAVE_SCALAPACK)
+    type(dense_factor), allocatable :: distributed(:)
+#endif
     real(real_8), allocatable :: shifts(:), factor(:,:,:), green(:,:,:,:)
     real(real_8), allocatable :: work(:,:,:), lifted_rhs(:,:,:), trace(:,:), local_trace(:,:)
     integer, allocatable :: local_ij(:,:), wall_component(:), factor_of_mode(:)
@@ -45,22 +58,32 @@ module qg_cmm
 contains
 
   ! decomp and geom are immutable over this cache's lifetime.
-  subroutine setup_cmm(cache, decomp, geom, shifts, error, retain_green)
+  subroutine setup_cmm(cache, decomp, geom, shifts, error, retain_green, max_dense_bytes, distributed_factor)
     type(cmm_cache), intent(inout) :: cache
     type(decomposition), target, intent(in) :: decomp
     type(distributed_geometry), target, intent(in) :: geom
     real(real_8), intent(in) :: shifts(:)
     character(*), intent(out) :: error
-    logical, optional, intent(in) :: retain_green
+    logical, optional, intent(in) :: retain_green,distributed_factor
+    integer(wide), optional, intent(in) :: max_dense_bytes
     integer :: m, nf, l, k, i, j, n, mode, ierr, compare, invalid, any_invalid
     integer, allocatable :: representative(:), iwork(:)
     real(real_8), allocatable :: condition_work(:)
-    logical :: keep_fields
+    real(real_8) :: root_shifts(size(shifts))
+    integer(wide) :: budget,root_budget,dense_peak,green_bytes,local_points
+    integer(wide), parameter :: real_bytes = storage_size(0.0D0)/8, integer_bytes = storage_size(0)/8
+    integer :: settings(3), factor_map(size(shifts))
+    logical :: keep_fields,use_distributed
+#if defined(PETSC) && defined(PETSC_HAVE_SCALAPACK)
+    integer, allocatable :: owned_rows(:)
+    integer(wide) :: local_factor_bytes
+    real(real_8) :: base_eigenvalue,condition_bound,asymmetry
+#endif
 
     error = ''
     invalid = 0
     if (associated(cache%decomp)) invalid = 1
-    if (decomp%periodic_j .or. decomp%layers /= size(shifts)) invalid = 1
+    if (decomp%periodic_j .or. decomp%layers /= size(shifts) .or. size(shifts) < 1) invalid = 1
     if (any(shifts < 0.0D0) .or. .not. all(ieee_is_finite(shifts))) invalid = 1
     if (any([decomp%ii_0,decomp%jj_0,decomp%ii,decomp%jj] /= [geom%i0,geom%j0,geom%ni,geom%nj])) invalid = 1
     if (any(shape(geom%owner) /= [decomp%g_ii,decomp%g_jj])) invalid = 1
@@ -74,12 +97,30 @@ contains
 
     keep_fields = .false.
     if (present(retain_green)) keep_fields = retain_green
-    cache%geom => geom
-    cache%decomp => decomp
-    cache%shifts = shifts
-    allocate(cache%factor_of_mode(decomp%layers),representative(decomp%layers))
+    use_distributed = .false.
+    if (present(distributed_factor)) use_distributed = distributed_factor
+    budget = huge(budget)
+    if (present(max_dense_bytes)) budget = max_dense_bytes
+    settings = [size(shifts),merge(1,0,keep_fields),merge(1,0,use_distributed)]
+    call mpi_bcast(settings,size(settings),MPI_INTEGER,0,geom%comm,ierr)
+    if (any(settings /= [size(shifts),merge(1,0,keep_fields),merge(1,0,use_distributed)])) &
+      error = 'CMM settings differ across ranks'
+    if (use_distributed .and. .not. has_scalapack) error = 'distributed CMM factors require PETSc ScaLAPACK'
+    call broadcast_error(geom%comm,geom%rank,geom%ranks,error)
+    if (len_trim(error) /= 0) return
+    root_budget = budget
+    root_shifts = shifts
+    call mpi_bcast(root_budget,1,MPI_INTEGER8,0,geom%comm,ierr)
+    call mpi_bcast(root_shifts,size(shifts),MPI_DOUBLE_PRECISION,0,geom%comm,ierr)
+    if (root_budget /= budget .or. any(root_shifts /= shifts)) error = 'CMM settings differ across ranks'
+    if (budget < 0) error = 'CMM dense memory budget must be nonnegative'
+    call broadcast_error(geom%comm,geom%rank,geom%ranks,error)
+    if (len_trim(error) /= 0) return
+
+    n = size(shifts)
+    allocate(representative(n))
     nf = 0
-    do l = 1,decomp%layers
+    do l = 1,n
       do k = 1,nf
         if (shifts(l) == shifts(representative(k))) exit
       end do
@@ -87,10 +128,40 @@ contains
         nf = nf+1
         representative(nf) = l
       end if
-      cache%factor_of_mode(l) = k
+      factor_map(l) = k
     end do
-
     m = count(geom%global%kind(2:decomp%g_ii-1,2:decomp%g_jj-1) == wall_node)
+    local_points = int(geom%ni,wide)*geom%nj
+    dense_peak = 0
+    green_bytes = 0
+    if (m > 0 .and. geom%rank == 0 .and. .not. use_distributed) then
+      if (int(m,wide) > (huge(dense_peak)-int(m,wide)*(3*real_bytes+integer_bytes))/real_bytes/nf/m) then
+        error = 'CMM dense setup byte count overflows'
+      else
+        dense_peak = real_bytes*int(m,wide)*m*nf+int(m,wide)*(3*real_bytes+integer_bytes)
+        if (dense_peak > budget) then
+          write(error,'(a,i0,a,i0)') 'CMM dense setup requires ',dense_peak,' bytes, budget ',budget
+        end if
+      end if
+    end if
+    if (keep_fields .and. m > 0) then
+      if (local_points > (huge(green_bytes)/2)/real_bytes/m/nf) then
+        error = 'CMM retained field byte count overflows'
+      else
+        green_bytes = local_points*m*nf*real_bytes
+      end if
+    end if
+    call broadcast_error(geom%comm,geom%rank,geom%ranks,error)
+    if (len_trim(error) /= 0) return
+
+    cache%geom => geom
+    cache%decomp => decomp
+    cache%shifts = shifts
+    cache%factor_of_mode = factor_map
+    cache%stats%distributed_factor = use_distributed
+    cache%stats%dense_setup_peak_bytes = dense_peak
+    cache%stats%explicit_array_bytes = real_bytes*(n+2*local_points*n+int(geom%ni+2,wide)*(geom%nj+2)*n+ &
+      2*int(m,wide)*n)+integer_bytes*(int(n,wide)+3*int(m,wide))+green_bytes
     allocate(cache%local_ij(2,m),cache%wall_component(m))
     cache%local_ij = 0
     cache%stats%constraints = m
@@ -120,15 +191,24 @@ contains
     allocate(cache%work(geom%ni,geom%nj,decomp%layers),cache%lifted_rhs(geom%ni,geom%nj,decomp%layers))
     if (m == 0) return
 
-    n = size(shifts)
     allocate(cache%trace(m,n),cache%local_trace(m,n))
-    if (geom%rank == 0) then
+#if defined(PETSC) && defined(PETSC_HAVE_SCALAPACK)
+    if (use_distributed) then
+      allocate(cache%distributed(nf))
+      owned_rows = pack([(k,k=1,m)],cache%local_ij(1,:) > 0)
+      do l = 1,nf
+        call create_factor(cache%distributed(l),geom%comm,geom%ranks,m)
+      end do
+    end if
+#endif
+    if (geom%rank == 0 .and. .not. use_distributed) then
       allocate(cache%factor(m,m,nf),condition_work(3*m),iwork(m))
-      cache%stats%factor_bytes = int(m,wide)*m*nf*(storage_size(0.0D0)/8)
+      cache%stats%factor_bytes = int(m,wide)*m*nf*real_bytes
+      cache%stats%explicit_array_bytes = cache%stats%explicit_array_bytes+cache%stats%factor_bytes
     end if
     if (keep_fields) then
       allocate(cache%green(geom%ni,geom%nj,m,nf))
-      cache%stats%local_green_bytes = size(cache%green,kind=wide)*(storage_size(0.0D0)/8)
+      cache%stats%local_green_bytes = green_bytes
     end if
 
     do k = 1,m
@@ -138,15 +218,38 @@ contains
       if (i > 0) cache%work(i,j,representative(:nf)) = 1.0D0
       call rectangle_inverse(cache,error)
       if (len_trim(error) /= 0) exit
-      call restrict_to_wall(cache,cache%work)
+      call sample_wall(cache,cache%work)
+      if (.not. use_distributed) call reduce_wall(cache)
       do l = 1,nf
         mode = representative(l)
-        if (geom%rank == 0) cache%factor(:,k,l) = -cache%trace(:,mode)
+#if defined(PETSC) && defined(PETSC_HAVE_SCALAPACK)
+        if (use_distributed) then
+          call set_factor_column(cache%distributed(l),k,owned_rows,-cache%local_trace(:,mode))
+          if (mod(k,32)==0 .or. k==m) call assemble_factor(cache%distributed(l),k==m)
+        end if
+#endif
+        if (geom%rank == 0 .and. .not. use_distributed) cache%factor(:,k,l) = -cache%trace(:,mode)
         if (keep_fields) cache%green(:,:,k,l) = cache%work(:,:,mode)
       end do
     end do
 
-    if (geom%rank == 0 .and. len_trim(error) == 0) then
+#if defined(PETSC) && defined(PETSC_HAVE_SCALAPACK)
+    if (use_distributed .and. len_trim(error) == 0) then
+      base_eigenvalue = 4*(sin(pi/(2*(decomp%g_ii-1)))**2+sin(pi/(2*(decomp%g_jj-1)))**2)
+      do l = 1,nf
+        mode = representative(l)
+        condition_bound = min(1.0D0,base_eigenvalue+shifts(mode))/(8+shifts(mode))
+        call factor_dense(cache%distributed(l),condition_bound,cache%stats%max_rectangle_backward_error, &
+                          asymmetry,local_factor_bytes,error)
+        if (len_trim(error) /= 0) exit
+        cache%stats%min_rcond = min(cache%stats%min_rcond,condition_bound)
+        cache%stats%relative_asymmetry = max(cache%stats%relative_asymmetry,asymmetry)
+        cache%stats%factor_bytes = cache%stats%factor_bytes+local_factor_bytes
+      end do
+      cache%stats%explicit_array_bytes = cache%stats%explicit_array_bytes+cache%stats%factor_bytes
+    end if
+#endif
+    if (geom%rank == 0 .and. .not. use_distributed .and. len_trim(error) == 0) then
       do l = 1,nf
         call factor_capacitance(cache%factor(:,:,l), cache%stats, condition_work, iwork, error)
         if (len_trim(error) /= 0) exit
@@ -260,10 +363,10 @@ contains
     if (.not. ieee_is_finite(residual)) residual = huge(residual)
   end subroutine measure_residual
 
-  subroutine restrict_to_wall(cache, field)
+  subroutine sample_wall(cache, field)
     type(cmm_cache), intent(inout) :: cache
     real(real_8), intent(in) :: field(:,:,:)
-    integer :: k, i, j, ierr
+    integer :: k, i, j
 
     cache%local_trace = 0.0D0
     do k = 1,size(cache%local_ij,2)
@@ -271,8 +374,18 @@ contains
       j = cache%local_ij(2,k)
       if (i > 0) cache%local_trace(k,:) = field(i,j,:)
     end do
-    call mpi_reduce(cache%local_trace,cache%trace,size(cache%trace),MPI_DOUBLE_PRECISION,MPI_SUM,0,cache%geom%comm,ierr)
-  end subroutine restrict_to_wall
+  end subroutine sample_wall
+
+  subroutine reduce_wall(cache)
+    type(cmm_cache), intent(inout) :: cache
+    integer :: ierr
+
+    if (cache%stats%distributed_factor) then
+      call mpi_allreduce(cache%local_trace,cache%trace,size(cache%trace),MPI_DOUBLE_PRECISION,MPI_SUM,cache%geom%comm,ierr)
+    else
+      call mpi_reduce(cache%local_trace,cache%trace,size(cache%trace),MPI_DOUBLE_PRECISION,MPI_SUM,0,cache%geom%comm,ierr)
+    end if
+  end subroutine reduce_wall
 
   ! Solve the physical strict-fluid equations with the supplied modal component
   ! constants. The returned fictitious values are part of the embedding extension.
@@ -282,7 +395,7 @@ contains
     real(real_8), intent(out) :: solution(:,:,:)
     character(*), intent(out) :: error
     integer :: l, k, i, j, m, ierr, info, invalid, any_invalid
-    real(real_8) :: residual, wall_error, global_wall_error
+    real(real_8) :: residual, wall_error, global_wall_error, root_values(size(constants,1),size(constants,2))
 
     error = ''
     if (.not. associated(cache%decomp)) then
@@ -298,6 +411,12 @@ contains
       error = 'CMM requires finite RHS and wall values with the cache dimensions'
       return
     end if
+    root_values = constants
+    call mpi_bcast(root_values,size(root_values),MPI_DOUBLE_PRECISION,0,cache%geom%comm,ierr)
+    if (any(root_values /= constants)) error = 'CMM wall values differ across ranks'
+    call broadcast_error(cache%geom%comm,cache%geom%rank,cache%geom%ranks,error)
+    if (len_trim(error) /= 0) return
+
     cache%work = rhs
     do l = 1,size(cache%shifts)
       call add_laplace_bc_rhs(cache%decomp,constants(0,l),cache%work(:,:,l))
@@ -311,8 +430,17 @@ contains
     m = cache%stats%constraints
     if (m == 0) return
 
-    call restrict_to_wall(cache,solution)
-    if (cache%geom%rank == 0) then
+    call sample_wall(cache,solution)
+    call reduce_wall(cache)
+#if defined(PETSC) && defined(PETSC_HAVE_SCALAPACK)
+    if (cache%stats%distributed_factor) then
+      do l = 1,size(cache%shifts)
+        cache%trace(:,l) = cache%trace(:,l)-constants(cache%wall_component,l)
+        call solve_dense(cache%distributed(cache%factor_of_mode(l)),cache%trace(:,l))
+      end do
+    end if
+#endif
+    if (cache%geom%rank == 0 .and. .not. cache%stats%distributed_factor) then
       do l = 1,size(cache%shifts)
         cache%trace(:,l) = cache%trace(:,l)-constants(cache%wall_component,l)
         call dpotrs('L',m,1,cache%factor(:,:,cache%factor_of_mode(l)),m,cache%trace(:,l:l),m,info)
@@ -324,7 +452,8 @@ contains
     end if
     call mpi_bcast(error,len(error),MPI_CHARACTER,0,cache%geom%comm,ierr)
     if (len_trim(error) /= 0) return
-    call mpi_bcast(cache%trace,size(cache%trace),MPI_DOUBLE_PRECISION,0,cache%geom%comm,ierr)
+    if (.not. cache%stats%distributed_factor) &
+      call mpi_bcast(cache%trace,size(cache%trace),MPI_DOUBLE_PRECISION,0,cache%geom%comm,ierr)
 
     if (allocated(cache%green)) then
       do l = 1,size(cache%shifts)
@@ -389,6 +518,9 @@ contains
 
   subroutine release_cmm(cache)
     type(cmm_cache), intent(inout) :: cache
+#if defined(PETSC) && defined(PETSC_HAVE_SCALAPACK)
+    integer :: l
+#endif
 
     if (.not. associated(cache%decomp)) return
     call deallocate(cache%rectangle)
@@ -397,6 +529,14 @@ contains
     deallocate(cache%requests)
     deallocate(cache%work,cache%lifted_rhs,cache%shifts,cache%factor_of_mode,cache%local_ij,cache%wall_component)
     if (allocated(cache%factor)) deallocate(cache%factor)
+#if defined(PETSC) && defined(PETSC_HAVE_SCALAPACK)
+    if (allocated(cache%distributed)) then
+      do l = 1,size(cache%distributed)
+        call destroy_factor(cache%distributed(l))
+      end do
+      deallocate(cache%distributed)
+    end if
+#endif
     if (allocated(cache%green)) deallocate(cache%green)
     if (allocated(cache%trace)) deallocate(cache%trace,cache%local_trace)
     nullify(cache%decomp,cache%geom)

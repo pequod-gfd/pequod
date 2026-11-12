@@ -22,9 +22,9 @@ program test_irregular_mpi_geometry
   character(30) :: fixture
 
   ! The external fixture runner passes the geometry path and runs 1/2/4/12 ranks.
-  if (command_argument_count() == 0) then
+  if (command_argument_count() /= 2) then
     print '(a)', 'Geometry MPI fixture requires a .dat path and case name'
-    stop
+    stop 2
   end if
   call get_command_argument(1,path)
   call get_command_argument(2,fixture)

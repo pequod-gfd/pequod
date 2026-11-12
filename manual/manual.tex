@@ -705,6 +705,74 @@ conservation of the relative potential vorticity. CABARET is stable in one
 dimension for a Courant number $\leq 1$, and in two dimensions for a Courant
 number $\leq 0.5$.
 
+\section{Experimental irregular-domain tools}\label{sect:irregular-experimental}
+
+The CMM development interface supports standalone closed-domain geometry,
+prescribed-Dirichlet inversion, and verification of cut-cell operators.
+Simulations launched with \verb|qg3| use the rectangular driver.
+The coupled singular wall equations, physical source stages, and
+irregular pickup remain development work.
+
+\subsection{Generate a domain}
+
+\begin{verbatim}
+python3 scripts/qg_irregular 33 33 --bounds 0 1 0 1 \
+  --coordinate-units normalized --fluid 'x+y < 1' \
+  --output triangle.dat --plot triangle.png
+python3 scripts/qg_irregular --check triangle.dat
+\end{verbatim}
+
+The grid requires equal spacing on both axes. The predicate accepts Boolean
+expressions of the physical coordinates, including \verb|AND|, \verb|OR|,
+and \verb|NOT|. The tool writes a checksummed version-1 geometry, a plot
+with hatched land, and a JSON report. The geometry describes one connected
+fluid basin and zero or more separate islands, with axial and diagonal
+coast segments. Global indices are one based, with the first index
+increasing southward and the second eastward.
+
+Predicate sampling uses dyadic subdivisions with default depth four. Use
+\verb|--sample-preflight| with the grid and predicate to report the requested
+number of samples, the configured limit, and a lower bound on the main
+sample buffers before generation. The default limit is 20 million padded
+samples. A $513\times513$ grid fits this limit at explicit depth three.
+Use \verb|--max-sample-points| to set a different limit according to the
+available memory. The contour sampling depth is preserved throughout
+generation.
+
+\subsection{Run development checks}
+
+\begin{verbatim}
+make cmm-check PYTHON=python3 CMM_CHECK_ARGS='--timeout 180'
+\end{verbatim}
+
+The test runner needs NumPy, SciPy, Matplotlib, ContourPy, MPI, LAPACK and
+BLAS. The default run builds both the native and PETSc variants in a fresh
+directory. Use \verb|--backend native| or \verb|--backend petsc| to exercise
+one variant. Use \verb|--work-parent| for a filesystem with room for both
+builds, fixtures and logs, and set \verb|TMPDIR| if compiler scratch needs a
+separate location. The report records effective build options, source and
+geometry hashes, test commands, and individual outcomes. Current
+experimental acceptance failures return a nonzero exit status.
+
+The standalone two-solve CMM cache reuses dense factors for repeated modal
+shifts. The optional Fortran \verb|max_dense_bytes| setup argument caps the
+root dense factor and its condition-estimation workspace before allocation.
+The statistics distinguish that peak from explicit persistent solver arrays.
+Backend workspaces, MPI buffering, geometry, and transport plans have
+separate memory costs. A build with PETSc ScaLAPACK also accepts the
+optional Fortran argument \verb|distributed_factor=.true.|. It uses
+block-cyclic capacitance factors and the same two background solves.
+The root-array cap applies to the root factorization path. PETSc reports
+the distributed local matrix payload separately from its communication
+and factorization workspace.
+
+The experimental \verb|scripts/cmm_checkpoint.py| tool reads and merges
+version-1 CMM development shards. Its merge command requires the matching
+geometry and validates the geometry identity and global wet-cell and face
+coverage. The format is intended for testing versioned state and
+repartitioning. The current \verb|qg3| driver uses its existing checkpoint
+files.
+
 \begin{figure}
   \begin{centering}
     \begin{tabular}{c c}

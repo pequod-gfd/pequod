@@ -133,6 +133,35 @@ class GeometryTests(unittest.TestCase):
         with self.assertRaisesRegex(GeometryError, "multiple sampled crossings"):
             API["sampled_loops"](grid, oscillatory, 1e-8, 4)
 
+    def test_sampling_preflight_and_tiling(self):
+        large = Grid(513, 513, (0., 1., 0., 1.), "normalized")
+        plan = API["sampling_plan"](large, 4)
+        self.assertFalse(plan["fits_sample_budget"])
+        self.assertEqual(plan["sample_points"], 8195**2)
+        with self.assertRaisesRegex(GeometryError, "explicit --max-depth 3"):
+            API["check_sample_budget"](large, plan)
+        self.assertTrue(API["sampling_plan"](large, 3)["fits_sample_budget"])
+        small = Grid(33, 33, (0., 1., 0., 1.), "normalized")
+        predicate = API["parse_predicate"]("abs(x-0.5)+abs(y-0.5) < 0.375")
+        loops, samples = API["sampled_loops"](small, predicate, 1e-8, 3)
+        tiled_loops, tiled_samples = API["sampled_loops"](small, predicate, 1e-8, 3, tile_points=530)
+        self.assertEqual(loops, tiled_loops)
+        self.assertEqual(len(samples), len(tiled_samples))
+        for (area, points), (tiled_area, tiled_points) in zip(samples, tiled_samples):
+            self.assertEqual(area, tiled_area)
+            np.testing.assert_array_equal(points, tiled_points)
+
+    def test_contour_distance_matches_all_segments(self):
+        random = np.random.default_rng(1729)
+        path = np.vstack((random.uniform(-2, 2, (50, 2)), [[-8, 4], [9, -6]]))
+        queries = np.vstack((random.uniform(-4, 4, (150, 2)), [[100, -100], [1, 0], [0, 0]]))
+        for points in (queries[:150], queries[150:]):
+            steps = np.diff(path, axis=0)
+            delta = points[:, None, :] - path[:-1]
+            ratio = np.clip(np.einsum("ijk,jk->ij", delta, steps)/np.sum(steps*steps, axis=-1), 0, 1)
+            truth = np.max(np.min(np.linalg.norm(delta-ratio[..., None]*steps, axis=-1), axis=-1))
+            self.assertAlmostEqual(API["distances_to_path"](points, path), truth, places=13)
+
     def test_roundtrip_corruption_and_plot(self):
         with tempfile.TemporaryDirectory() as directory:
             directory = Path(directory)

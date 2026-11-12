@@ -23,6 +23,14 @@ program test_irregular_straight_wall
   integer :: f,side,component,ray,q(2),wall_count,global_count,k
   character(1024) :: path,error
   character(30) :: fixture
+  logical :: scalar_only
+
+  call get_command_argument(1,path)
+  scalar_only = command_argument_count() == 1 .and. path == '--scalar'
+  if (.not. scalar_only .and. command_argument_count() /= 2) then
+    print '(a)', 'Straight-wall fixture requires a .dat path and case name, or --scalar'
+    stop 2
+  end if
 
   call initialise_wall_slip(no_slip,BC_NO_SLIP,error)
   call require(len_trim(error) == 0,error)
@@ -56,7 +64,7 @@ program test_irregular_straight_wall
     rates = log(errors(1:2,:)/errors(2:3,:))/log(2.0D0)
     call require(all(rates > 1.8D0),'normal Taylor or independent no-slip velocity order')
   end do
-  if (command_argument_count() == 0) then
+  if (scalar_only) then
     print '(a)', '[straight slip selectors and normal polynomial convergence] : PASS'
     stop
   end if
@@ -198,7 +206,7 @@ contains
     logical, intent(in) :: condition
     character(*), intent(in) :: message
     if (.not. condition) then
-      if (command_argument_count() == 0) then
+      if (scalar_only) then
         print '(a)', trim(message)
         stop 1
       end if

@@ -12,9 +12,37 @@ module lapack_interfaces
   
   public :: eigendecompose, eigendecompose_symmetric, eigenrecompose, &
     & eigenrecompose_symmetric, determinant, invert, inverse, solve
-  public :: dpotrf, dpotrs, dpocon
+  public :: dpotrf, dpotrs, dpocon, dgesvd
+  public :: dgetrf, dgetrs, dgecon
 
   interface
+    subroutine dgetrs(trans, n, nrhs, a, lda, ipiv, b, ldb, info)
+      import real_8
+      character, intent(in) :: trans
+      integer, intent(in) :: n, nrhs, lda, ldb, ipiv(n)
+      real(real_8), intent(in) :: a(lda,n)
+      real(real_8), intent(inout) :: b(ldb,nrhs)
+      integer, intent(out) :: info
+    end subroutine dgetrs
+
+    subroutine dgecon(norm, n, a, lda, anorm, rcond, work, iwork, info)
+      import real_8
+      character, intent(in) :: norm
+      integer, intent(in) :: n, lda
+      real(real_8), intent(in) :: a(lda,n), anorm
+      real(real_8), intent(out) :: rcond, work(4*n)
+      integer, intent(out) :: iwork(n), info
+    end subroutine dgecon
+
+    subroutine dgesvd(jobu, jobvt, m, n, a, lda, s, u, ldu, vt, ldvt, work, lwork, info)
+      import real_8
+      character, intent(in) :: jobu, jobvt
+      integer, intent(in) :: m, n, lda, ldu, ldvt, lwork
+      real(real_8), intent(inout) :: a(lda,n)
+      real(real_8), intent(out) :: s(min(m,n)), u(ldu,*), vt(ldvt,*), work(*)
+      integer, intent(out) :: info
+    end subroutine dgesvd
+
     subroutine dpotrf(uplo, n, a, lda, info)
       import real_8
       character, intent(in) :: uplo

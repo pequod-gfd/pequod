@@ -13,6 +13,15 @@ from scipy.sparse.linalg import splu
 GENERATOR = Path(__file__).resolve().parents[1] / "scripts" / "qg_irregular"
 CARDINAL = [(-1, 0), (0, -1), (1, 0), (0, 1)]
 SHIFTS = [0, 0.3, 0.3]
+ALGEBRAIC_FIXTURES = (
+    ("rectangle", 17, "True", (1, 4)),
+    ("triangle", 33, "x+y < 1", (1, 2, 4, 12)),
+    ("bay", 33, "(x <= 0.5 AND y >= 0.3) OR (x > 0.5 AND y > 0.1)", (1, 4)),
+    ("islands", 33, "(x > 0.093 AND y > 0.093) AND NOT (abs(x-0.34375)+abs(y-0.4375) <= 0.125 "
+                    "OR abs(x-0.75)+abs(y-0.65625) <= 0.125)", (1, 2, 4, 12)),
+    ("near-islands", 33, "NOT (abs(x-0.34375)+abs(y-0.5) <= 0.125 "
+                         "OR abs(x-0.65625)+abs(y-0.5) <= 0.125)", (1, 4)),
+)
 
 
 def generate(folder, n, predicate, name):
@@ -112,16 +121,7 @@ def main():
     parser.add_argument("--work", type=Path, required=True)
     args = parser.parse_args()
     args.work.mkdir(parents=True, exist_ok=True)
-    fixtures = [
-        ("rectangle", 17, "True", (1, 4)),
-        ("triangle", 33, "x+y < 1", (1, 2, 4, 12)),
-        ("bay", 33, "(x <= 0.5 AND y >= 0.3) OR (x > 0.5 AND y > 0.1)", (1, 4)),
-        ("islands", 33, "(x > 0.093 AND y > 0.093) AND NOT (abs(x-0.34375)+abs(y-0.4375) <= 0.125 "
-                        "OR abs(x-0.75)+abs(y-0.65625) <= 0.125)", (1, 2, 4, 12)),
-        ("near-islands", 33, "NOT (abs(x-0.34375)+abs(y-0.5) <= 0.125 "
-                             "OR abs(x-0.65625)+abs(y-0.5) <= 0.125)", (1, 4)),
-    ]
-    for name, n, predicate, rank_counts in fixtures:
+    for name, n, predicate, rank_counts in ALGEBRAIC_FIXTURES:
         dat = generate(args.work, n, predicate, name)
         reference = None
         for executable in (args.native, args.petsc):

@@ -1,7 +1,8 @@
 #include "config.h"
 
 module qg_irregular_parallel
-  use qg_geometry, only: irregular_geometry, read_geometry, fluid_node
+  use qg_geometry, only: irregular_geometry, read_geometry, fluid_node, solid_node
+  use qg_moments, only: n_moments, triangle_moments
   use qg_parallel, only: pabort
   use qg_parameters, only: real_8
   implicit none
@@ -9,6 +10,8 @@ module qg_irregular_parallel
   private
   public :: distributed_geometry, open_face, wall_segment, donor_plan
   public :: load_distributed_geometry, build_donor_plan, gather_donors
+  public :: half_coordinates, cell_mean_moments, make_sector_moments, broadcast_error
+  public :: share_face_flux, gather_second_face_trace
 
   integer, parameter :: face_di(4) = [1,0,-1,0], face_dj(4) = [0,1,0,-1]
   integer, parameter :: opposite(4) = [3,4,1,2]
@@ -28,6 +31,11 @@ module qg_irregular_parallel
     real(real_8) :: length, outward(2)
   end type wall_segment
 
+  type face_exchange
+    integer, allocatable :: send_count(:), receive_count(:), send_offset(:), receive_offset(:)
+    integer, allocatable :: send_face(:), receive_face(:)
+  end type face_exchange
+
   type distributed_geometry
     type(irregular_geometry) :: global
     integer :: comm, rank, ranks ! communicator borrowed from the caller
@@ -38,11 +46,13 @@ module qg_irregular_parallel
     type(open_face), allocatable :: faces(:)
     integer, allocatable :: face_index(:,:,:) ! south, east, north, west; 0 for closed
     type(wall_segment), allocatable :: walls(:) ! owned only
+    type(face_exchange), private :: face_comm
   end type distributed_geometry
 
   type donor_plan
     private
     integer :: comm
+    integer :: ni, nj
     integer, allocatable :: request_count(:), request_offset(:)
     integer, allocatable :: send_count(:), send_offset(:), send_local(:,:), result_slot(:)
   end type donor_plan
@@ -56,12 +66,19 @@ contains
     type(distributed_geometry), intent(out) :: geom
     character(*), intent(out) :: error
     integer, allocatable :: boxes(:,:)
-    integer :: ierr, rank, ranks, count, n, component, a, b, c, d
-    real(real_8) :: metadata(8)
+    integer :: ierr, rank, ranks, count, n, component, a, b, c, d, dimensions(2)
+    real(real_8) :: metadata(8), grid_step
 
     call mpi_comm_rank(comm, rank, ierr)
     call mpi_comm_size(comm, ranks, ierr)
     error = ''
+    dimensions = [ni,nj]
+    grid_step = physical_h
+    call mpi_bcast(dimensions,2,MPI_INTEGER,0,comm,ierr)
+    call mpi_bcast(grid_step,1,MPI_DOUBLE_PRECISION,0,comm,ierr)
+    if (any(dimensions /= [ni,nj]) .or. grid_step /= physical_h) error = 'geometry dimensions or grid step differ across ranks'
+    call broadcast_error(comm,rank,ranks,error)
+    if (len_trim(error) /= 0) return
     if (rank == 0) then
       if (int(ni,selected_int_kind(18))*nj > huge(ni)/2) then
         error = 'embedding is too large for version-1 face IDs'
@@ -135,6 +152,9 @@ contains
     end do
     call derive_owned_geometry(geom, error)
     call broadcast_error(comm,rank,ranks,error)
+    if (len_trim(error) /= 0) return
+    call setup_face_exchange(geom, geom%face_comm, error)
+    call broadcast_error(comm,rank,ranks,error)
   end subroutine load_distributed_geometry
 
   subroutine broadcast_error(comm, rank, ranks, error)
@@ -154,29 +174,30 @@ contains
     q = [2*(j-1),2*(ni-i)]
   end function half_coordinates
 
-  subroutine wedge_moments(mask, h, area, moments)
+  pure function make_sector_moments() result(sector)
+    real(real_8) :: sector(n_moments,0:7)
+    integer :: ray, next
+
+    do ray = 0,7
+      next = modulo(ray+1,8)
+      sector(:,ray) = triangle_moments(0.5D0*[ray_x(ray),ray_y(ray)],0.5D0*[ray_x(next),ray_y(next)])
+    end do
+  end function make_sector_moments
+
+  pure function cell_mean_moments(mask, sector) result(moments)
     integer, intent(in) :: mask
-    real(real_8), intent(in) :: h
-    real(real_8), intent(out) :: area, moments(6)
-    integer :: ray, next, count
-    real(real_8) :: x, y, u, v
+    real(real_8), intent(in) :: sector(n_moments,0:7)
+    real(real_8) :: moments(n_moments)
+    integer :: ray, count
 
     count = popcnt(mask)
-    area = (h*h/8)*count
     moments = 0.0D0
     if (count == 0) return
     do ray = 0,7
-      if (.not. btest(mask,ray)) cycle
-      next = modulo(ray+1,8)
-      x = 0.5D0*ray_x(ray)
-      y = 0.5D0*ray_y(ray)
-      u = 0.5D0*ray_x(next)
-      v = 0.5D0*ray_y(next)
-      moments = moments + [1.0D0, (x+u)/3, (y+v)/3, (x*x+x*u+u*u)/6, &
-                            (x*y+u*v)/6+(x*v+u*y)/12, (y*y+y*v+v*v)/6]
+      if (btest(mask,ray)) moments = moments + sector(:,ray)
     end do
     moments = moments/count
-  end subroutine wedge_moments
+  end function cell_mean_moments
 
   subroutine derive_owned_geometry(geom, error)
     type(distributed_geometry), intent(inout) :: geom
@@ -186,12 +207,16 @@ contains
     integer :: i,j,gi,gj,ti,tj,ni,nj,mask,neighbor_mask,side,nface,nwall,n,k,component
     integer :: a(2),b(2),q(2),tangent(2),axis,offset(2)
     logical :: open_half(2), neighbor_half(2)
-    real(real_8) :: delta(2)
+    real(real_8) :: delta(2), sector(n_moments,0:7), all_moments(n_moments,0:255)
 
     error = ''
     ni = size(geom%owner,1)
     nj = size(geom%owner,2)
-    allocate(geom%area(geom%ni,geom%nj),geom%moments(6,geom%ni,geom%nj))
+    allocate(geom%area(geom%ni,geom%nj),geom%moments(n_moments,geom%ni,geom%nj))
+    sector = make_sector_moments()
+    do mask = 0,255
+      all_moments(:,mask) = cell_mean_moments(mask,sector)
+    end do
     allocate(geom%face_index(4,geom%ni,geom%nj),faces(4*geom%ni*geom%nj))
     geom%face_index = 0
     nface = 0
@@ -200,7 +225,8 @@ contains
       do j = 1,geom%nj
         gj = geom%j0+j
         mask = geom%global%wedge(gi,gj)
-        call wedge_moments(mask,geom%h,geom%area(i,j),geom%moments(:,i,j))
+        geom%area(i,j) = (geom%h**2/8)*popcnt(mask)
+        geom%moments(:,i,j) = all_moments(:,mask)
         do side = 1,4
           ti = gi+face_di(side)
           tj = gj+face_dj(side)
@@ -259,6 +285,127 @@ contains
     geom%walls = walls(:nwall)
   end subroutine derive_owned_geometry
 
+  subroutine setup_face_exchange(geom, plan, error)
+    type(distributed_geometry), intent(in) :: geom
+    type(face_exchange), intent(out) :: plan
+    character(*), intent(out) :: error
+    integer :: n, f, r, k, id, axis, i, j, nj, ierr
+    integer, allocatable :: cursor(:), send_ids(:), receive_ids(:)
+
+    n = geom%ranks-1
+    allocate(plan%send_count(0:n),plan%receive_count(0:n),plan%send_offset(0:n),plan%receive_offset(0:n),cursor(0:n))
+    plan%send_count = 0
+    do f = 1,size(geom%faces)
+      if (geom%faces(f)%owner /= geom%rank) cycle
+      associate(c => geom%faces(f)%cells(:,2))
+        r = geom%owner(c(1),c(2))
+      end associate
+      if (r /= geom%rank) plan%send_count(r) = plan%send_count(r)+1
+    end do
+    call mpi_alltoall(plan%send_count,1,MPI_INTEGER,plan%receive_count,1,MPI_INTEGER,geom%comm,ierr)
+    call offsets(plan%send_count,plan%send_offset)
+    call offsets(plan%receive_count,plan%receive_offset)
+    allocate(send_ids(sum(plan%send_count)),receive_ids(sum(plan%receive_count)))
+    allocate(plan%send_face(size(send_ids)),plan%receive_face(size(receive_ids)))
+    cursor = plan%send_offset
+    do f = 1,size(geom%faces)
+      if (geom%faces(f)%owner /= geom%rank) cycle
+      associate(c => geom%faces(f)%cells(:,2))
+        r = geom%owner(c(1),c(2))
+      end associate
+      if (r == geom%rank) cycle
+      cursor(r) = cursor(r)+1
+      send_ids(cursor(r)) = geom%faces(f)%id
+      plan%send_face(cursor(r)) = f
+    end do
+    call mpi_alltoallv(send_ids,plan%send_count,plan%send_offset,MPI_INTEGER, &
+                       receive_ids,plan%receive_count,plan%receive_offset,MPI_INTEGER,geom%comm,ierr)
+    error = ''
+    nj = size(geom%owner,2)
+    do k = 1,size(receive_ids)
+      id = receive_ids(k)
+      axis = modulo(id-1,2)+1
+      i = (id-1)/2/nj+1-geom%i0+face_di(axis)
+      j = modulo((id-1)/2,nj)+1-geom%j0+face_dj(axis)
+      if (i < 1 .or. i > geom%ni .or. j < 1 .or. j > geom%nj) then
+        error = 'shared face ID was sent to the wrong owner'
+        return
+      end if
+      f = geom%face_index(opposite(axis),i,j)
+      if (f == 0) then
+        error = 'shared face is missing on its receiving rank'
+        return
+      end if
+      if (geom%faces(f)%id /= id) then
+        error = 'shared face ID differs across its two incidences'
+        return
+      end if
+      plan%receive_face(k) = f
+    end do
+  end subroutine setup_face_exchange
+
+  ! Each owner supplies a single value. The adjacent rank receives it in its
+  ! local face ordering. Fields of any kind can share this incidence plan.
+  subroutine share_face_flux(geom, flux, error)
+    type(distributed_geometry), intent(in) :: geom
+    real(real_8), intent(inout) :: flux(:,:) ! (fields, local face IDs)
+    character(*), intent(out) :: error
+    real(real_8), allocatable :: send(:,:), receive(:,:)
+    integer :: fields, ierr, counts(2)
+
+    error = ''
+    fields = size(flux,1)
+    if (size(flux,2) /= size(geom%faces)) error = 'shared face flux has incompatible shape'
+    call broadcast_error(geom%comm,geom%rank,geom%ranks,error)
+    if (len_trim(error) /= 0) return
+    call mpi_allreduce([fields,-fields],counts,2,MPI_INTEGER,MPI_MAX,geom%comm,ierr)
+    if (counts(1) /= -counts(2)) then
+      error = 'shared face field counts differ across ranks'
+      return
+    end if
+    associate(plan => geom%face_comm)
+      send = flux(:,plan%send_face)
+      allocate(receive(fields,size(plan%receive_face)))
+      call mpi_alltoallv(send,fields*plan%send_count,fields*plan%send_offset,MPI_DOUBLE_PRECISION, &
+                         receive,fields*plan%receive_count,fields*plan%receive_offset,MPI_DOUBLE_PRECISION,geom%comm,ierr)
+      flux(:,plan%receive_face) = receive
+    end associate
+  end subroutine share_face_flux
+
+  ! Reverse the shared face exchange for a trace computed by cell 2.
+  ! Each rank fills the slots for cells it owns. After this exchange the
+  ! north/west face owner has both endpoint traces, including at MPI seams.
+  subroutine gather_second_face_trace(geom,trace,error)
+    type(distributed_geometry), intent(in) :: geom
+    real(real_8), intent(inout) :: trace(:,:,:,:) ! (endpoint, cell, layer, face)
+    character(*), intent(out) :: error
+    real(real_8), allocatable :: send(:,:,:),receive(:,:,:)
+    integer :: nl,fields,counts(2),ierr,k
+
+    error = ''
+    nl = size(trace,3)
+    if (nl < 1 .or. any(shape(trace) /= [2,2,nl,size(geom%faces)])) error = 'face trace has incompatible shape'
+    call broadcast_error(geom%comm,geom%rank,geom%ranks,error)
+    if (len_trim(error) /= 0) return
+    call mpi_allreduce([nl,-nl],counts,2,MPI_INTEGER,MPI_MAX,geom%comm,ierr)
+    if (counts(1) /= -counts(2)) then
+      error = 'face trace layer counts differ across ranks'
+      return
+    end if
+    fields = 2*nl
+    associate(plan => geom%face_comm)
+      allocate(send(2,nl,size(plan%receive_face)),receive(2,nl,size(plan%send_face)))
+      do k = 1,size(plan%receive_face)
+        send(:,:,k) = trace(:,2,:,plan%receive_face(k))
+      end do
+      call mpi_alltoallv(send,fields*plan%receive_count,fields*plan%receive_offset,MPI_DOUBLE_PRECISION, &
+                         receive,fields*plan%send_count,fields*plan%send_offset,MPI_DOUBLE_PRECISION,geom%comm,ierr)
+      do k = 1,size(plan%send_face)
+        trace(:,2,:,plan%send_face(k)) = receive(:,:,k)
+      end do
+    end associate
+  end subroutine gather_second_face_trace
+
   subroutine offsets(counts, displacement)
     integer, intent(in) :: counts(0:)
     integer, intent(out) :: displacement(0:)
@@ -272,15 +419,19 @@ contains
 
   ! points(:,k) is the global (i,j) of strict-fluid donor k.
   ! Sort requests by owner once; preserve the caller's result ordering.
-  subroutine build_donor_plan(geom, points, plan, error)
+  subroutine build_donor_plan(geom, points, plan, error, cell_means)
     type(distributed_geometry), intent(in) :: geom
     integer, intent(in) :: points(:,:)
     type(donor_plan), intent(out) :: plan
     character(*), intent(out) :: error
+    logical, intent(in), optional :: cell_means
     integer, allocatable :: requests(:,:), cursor(:)
     integer :: k, i, j, r, n, nr, ierr
+    logical :: allow_cut
 
     error = ''
+    allow_cut = .false.
+    if (present(cell_means)) allow_cut = cell_means
     n = size(points,2)
     nr = geom%ranks-1
     if (size(points,1) /= 2) error = 'donor coordinates must have shape (2,n)'
@@ -290,7 +441,9 @@ contains
       j = points(2,k)
       if (min(i,j) < 1 .or. i > size(geom%owner,1) .or. j > size(geom%owner,2)) then
         error = 'donor lies outside the embedding'
-      else if (geom%global%kind(i,j) /= fluid_node) then
+      else if (geom%global%kind(i,j) == solid_node .and. allow_cut) then
+        write(error,'(a,2(1x,i0))') 'cell mean donor must be wet at', i,j
+      else if (.not. allow_cut .and. geom%global%kind(i,j) /= fluid_node) then
         write(error,'(a,2(1x,i0))') 'donor must be a strict-fluid node at', i,j
       end if
     end do
@@ -298,6 +451,8 @@ contains
     if (len_trim(error) /= 0) return
 
     plan%comm = geom%comm
+    plan%ni = geom%ni
+    plan%nj = geom%nj
     allocate(plan%request_count(0:nr),plan%request_offset(0:nr),plan%send_count(0:nr),plan%send_offset(0:nr))
     allocate(plan%result_slot(n),requests(2,n),cursor(0:nr))
     plan%request_count = 0
@@ -327,12 +482,16 @@ contains
     real(real_8), intent(in) :: field(:,:,:) ! owned nodes only
     real(real_8), intent(out) :: samples(:,:) ! (layer, requested point)
     real(real_8), allocatable :: send(:,:), receive(:,:)
-    integer :: nl, n, k, ierr
+    integer :: nl, n, k, ierr, counts(2)
 
     nl = size(field,3)
     n = size(plan%result_slot)
-    if (any(shape(samples) /= [nl,n])) then
+    if (any(shape(field) /= [plan%ni,plan%nj,nl]) .or. any(shape(samples) /= [nl,n])) then
       labort('donor samples have incompatible shape')
+    end if
+    call mpi_allreduce([nl,-nl],counts,2,MPI_INTEGER,MPI_MAX,plan%comm,ierr)
+    if (counts(1) /= -counts(2)) then
+      labort('donor field counts differ across ranks')
     end if
     allocate(send(nl,size(plan%send_local,2)),receive(nl,n))
     do k = 1,size(send,2)

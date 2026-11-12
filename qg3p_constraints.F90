@@ -46,18 +46,22 @@ contains
     type(distributed_geometry), target, intent(in) :: geom
     type(stratification), target, intent(in) :: strat
     character(*), intent(out) :: error
-    integer :: nl, ierr
+    integer :: nl, ierr, invalid, global_invalid
     real(real_8) :: local_area
 
-    error = ''
-    if (size(geom%global%loops) /= 1) then
-      error = 'simply connected mass inverter requires one coastline'
-      return
-    end if
-    if (strat%ss(1) /= 0.0D0) then
-      error = 'mass inverter requires a barotropic first mode'
-      return
-    end if
+    ! geom and strat are successfully constructed collective inputs.
+    invalid = 0
+    if (size(geom%global%loops) /= 1) invalid = 2
+    if (strat%ss(1) /= 0.0D0) invalid = max(invalid,1)
+    call mpi_allreduce(invalid,global_invalid,1,MPI_INTEGER,MPI_MAX,geom%comm,ierr)
+    select case(global_invalid)
+      case(2)
+        error = 'simply connected mass inverter requires one coastline'
+        return
+      case(1)
+        error = 'mass inverter requires a barotropic first mode'
+        return
+    end select
     call setup_cmm(cache%cmm,decomp,geom,strat%ss,error)
     if (len_trim(error) /= 0) return
     cache%geom => geom
@@ -80,27 +84,59 @@ contains
     end if
   end subroutine setup_basin_mass
 
-  subroutine invert_basin_mass(cache, zeta, target_mass, psi, wall_values, error)
+  ! All ranks call on a common intracommunicator with the same group as the cache.
+  ! Pass comm explicitly so even a rank without a live cache can participate
+  ! in validation before any rank touches the cache's solver communicator.
+  subroutine invert_basin_mass(cache, comm, zeta, target_mass, psi, wall_values, error)
     type(basin_mass_cache), intent(inout) :: cache
+    integer, intent(in) :: comm
     real(real_8), intent(in) :: zeta(:,:,:), target_mass(:) ! modal totals, modes 2..L
     real(real_8), intent(out) :: psi(:,:,:), wall_values(:) ! layer streamfunction
     character(*), intent(out) :: error
     real(real_8) :: modal_constants(size(zeta,3)), mass(size(zeta,3)), scale
-    integer :: i, j, k
+    real(real_8) :: extremes(2*size(target_mass))
+    integer :: i, j, k, invalid, global_invalid, comparison, ierr, counts(2)
 
     error = ''
+    invalid = 0
     if (.not. associated(cache%geom)) then
-      error = 'basin mass cache is not initialized'
-      return
+      invalid = 4
+    else
+      call mpi_comm_compare(comm,cache%geom%comm,comparison,ierr)
+      if (comparison == MPI_UNEQUAL) then
+        invalid = 3
+      else if (any(shape(zeta) /= shape(cache%modal_rhs)) .or. any(shape(psi) /= shape(cache%modal_rhs)) .or. &
+               size(target_mass) /= cache%strat%layers-1 .or. size(wall_values) /= cache%strat%layers) then
+        invalid = 2
+      else if (.not. all(ieee_is_finite(target_mass))) then
+        invalid = 1
+      end if
     end if
-    if (any(shape(zeta) /= shape(cache%modal_rhs)) .or. any(shape(psi) /= shape(cache%modal_rhs)) .or. &
-        size(target_mass) /= cache%strat%layers-1 .or. size(wall_values) /= cache%strat%layers) then
+    call mpi_allreduce(invalid,global_invalid,1,MPI_INTEGER,MPI_MAX,comm,ierr)
+    select case(global_invalid)
+      case(4)
+        error = 'basin mass cache is not initialized'
+      case(3)
+        error = 'basin mass cache belongs to a different communicator group'
+      case(2)
+        error = 'incompatible simply connected mass inversion dimensions'
+      case(1)
+        error = 'baroclinic mass targets must be finite'
+    end select
+    if (global_invalid /= 0) return
+
+    k = size(target_mass)
+    call mpi_allreduce([k,-k],counts,2,MPI_INTEGER,MPI_MAX,comm,ierr)
+    if (counts(1) /= -counts(2)) then
       error = 'incompatible simply connected mass inversion dimensions'
       return
     end if
-    if (.not. all(ieee_is_finite(target_mass))) then
-      error = 'baroclinic mass targets must be finite'
-      return
+    if (k > 0) then
+      call mpi_allreduce([target_mass,-target_mass],extremes,2*k,MPI_DOUBLE_PRECISION,MPI_MAX,comm,ierr)
+      if (any(extremes(:k) /= -extremes(k+1:))) then
+        error = 'baroclinic mass targets differ across ranks'
+        return
+      end if
     end if
     associate(g => cache%geom, s => cache%strat)
       cache%particular = 0.0D0
@@ -116,6 +152,10 @@ contains
 
       call fluid_integrals(g,cache%particular,mass)
       modal_constants(2:) = (target_mass-mass(2:))/cache%response(2:)
+      if (.not. all(ieee_is_finite(modal_constants))) then
+        error = 'nonfinite baroclinic wall value from mass inversion'
+        return
+      end if
       do k = 2,s%layers
         cache%particular(:,:,k) = cache%particular(:,:,k)+modal_constants(k)*cache%harmonic(:,:,k)
       end do
@@ -127,7 +167,7 @@ contains
       call fluid_integrals(g,cache%particular,mass)
       do k = 2,s%layers
         scale = max(g%h**2,abs(target_mass(k-1)),abs(modal_constants(k))*cache%response(k))
-        if (abs(mass(k)-target_mass(k-1)) > 1.0D-11*scale) then
+        if (.not. ieee_is_finite(mass(k)) .or. abs(mass(k)-target_mass(k-1)) > 1.0D-11*scale) then
           error = 'baroclinic mass residual exceeds the inversion tolerance'
           return
         end if
